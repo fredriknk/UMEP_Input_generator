@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -10,6 +11,7 @@ from run_footprint_standalone import (
     footprint_for_row,
     validate_row,
     write_qgis_styles,
+    _select_output_paths,
 )
 
 
@@ -51,6 +53,20 @@ class StandaloneFootprintTests(unittest.TestCase):
             self.assertIn("singlebandpseudocolor", density_qml.read_text())
             self.assertIn("#d7191c", percent_qml.read_text())
             self.assertEqual(density_qml.name, "footprint_density.qml")
+
+    def test_selects_normal_output_names_when_available(self):
+        with tempfile.TemporaryDirectory() as folder:
+            density, percent = _select_output_paths(Path(folder) / "footprint")
+            self.assertEqual(density.name, "footprint_density.tif")
+            self.assertEqual(percent.name, "footprint_percent.tif")
+
+    def test_locked_output_selects_matched_run_suffix(self):
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder) / "footprint"
+            with patch("run_footprint_standalone._can_replace", return_value=False):
+                density, percent = _select_output_paths(prefix)
+            self.assertEqual(density.name, "footprint_run2_density.tif")
+            self.assertEqual(percent.name, "footprint_run2_percent.tif")
 
 
 if __name__ == "__main__":

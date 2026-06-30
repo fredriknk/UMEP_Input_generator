@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--angle-step", type=float, default=5.0)
     result.add_argument("--fetch", type=float, default=2000.0)
     result.add_argument("--resolution", type=float, default=5.0)
+    result.add_argument(
+        "--workers", type=int, default=min(4, os.cpu_count() or 1),
+        help="Parallel footprint workers per tower (default: up to 4)",
+    )
     result.add_argument("--start")
     result.add_argument("--end")
     result.add_argument("--invalid-row-policy", choices=("skip", "error"), default="skip")
@@ -89,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--input", str(input_path), "--tower-x", str(tower.x), "--tower-y", str(tower.y),
                 "--crs", crs, "--fetch", str(args.fetch), "--resolution", str(args.resolution),
                 "--output-prefix", str(footprint_prefix), "--invalid-row-policy", args.invalid_row_policy,
+                "--workers", str(args.workers),
             ]
             if run_footprint(footprint_args):
                 raise RuntimeError("footprint calculation failed")

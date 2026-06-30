@@ -12,7 +12,9 @@ import argparse
 import csv
 import logging
 import math
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,10 +92,12 @@ def footprint_for_row(
     ac, bc, cc = 2.17, 1.66, 20.0
     neutral_limit = 5000.0
 
-    rho = np.hypot(x, y)
-    theta = np.arctan2(x, y) - wind_dir * np.pi / 180.0
-    alongwind = rho * np.cos(theta)
-    crosswind = rho * np.sin(theta)
+    # Direct rotation is algebraically identical to the old polar-coordinate
+    # route, but avoids two expensive full-grid transcendental operations.
+    wind_radians = wind_dir * np.pi / 180.0
+    sin_wind, cos_wind = math.sin(wind_radians), math.cos(wind_radians)
+    alongwind = y * cos_wind + x * sin_wind
+    crosswind = x * cos_wind - y * sin_wind
 
     if ol <= 0 or ol >= neutral_limit:
         xx = (1.0 - 19.0 * zm / ol) ** 0.25
@@ -179,8 +183,7 @@ def write_geotiffs(
         grid.resolution,
         grid.resolution,
     )
-    density_path = output_prefix.with_name(output_prefix.name + "_density.tif")
-    percent_path = output_prefix.with_name(output_prefix.name + "_percent.tif")
+    density_path, percent_path = _select_output_paths(output_prefix)
 
     common = {
         "driver": "GTiff",
@@ -199,6 +202,51 @@ def write_geotiffs(
         dst.write(np.flipud(percent), 1)
         dst.set_band_description(1, "Cumulative contribution percentage")
     return density_path, percent_path
+
+
+def _can_replace(path: Path) -> bool:
+    """Return whether an existing file can be renamed/replaced on this system."""
+    if not path.exists():
+        return True
+    probe = path.with_name(path.name + ".lockcheck")
+    try:
+        path.replace(probe)
+        probe.replace(path)
+        return True
+    except OSError:
+        # If the first rename succeeded but the second did not, make a best
+        # effort to restore the original name before reporting the lock.
+        if probe.exists() and not path.exists():
+            try:
+                probe.replace(path)
+            except OSError:
+                pass
+        return False
+
+
+def _select_output_paths(output_prefix: Path) -> tuple[Path, Path]:
+    """Keep density/percent pairs together when QGIS locks an earlier result."""
+    def paths(prefix: Path) -> tuple[Path, Path]:
+        return (
+            prefix.with_name(prefix.name + "_density.tif"),
+            prefix.with_name(prefix.name + "_percent.tif"),
+        )
+
+    density, percent = paths(output_prefix)
+    if _can_replace(density) and _can_replace(percent):
+        return density, percent
+
+    run_number = 2
+    while True:
+        candidate = output_prefix.with_name(f"{output_prefix.name}_run{run_number}")
+        density, percent = paths(candidate)
+        if not density.exists() and not percent.exists():
+            logging.getLogger("footprint").warning(
+                "Existing output is open or locked; writing this run as %s_*",
+                candidate,
+            )
+            return density, percent
+        run_number += 1
 
 
 def write_qgis_styles(
@@ -280,6 +328,35 @@ def write_qgis_styles(
     return density_qml, percent_qml
 
 
+def _process_rows(
+    rows: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    invalid_row_policy: str,
+) -> tuple[np.ndarray, int, list[tuple[int, int, int, int, str]]]:
+    """Calculate one independent row chunk for sequential or threaded use."""
+    total = np.zeros(x.shape, dtype=np.float64)
+    valid_count = 0
+    qc_rows: list[tuple[int, int, int, int, str]] = []
+    for row in rows:
+        reason = validate_row(row)
+        if reason:
+            qc_rows.append((int(row[0]), int(row[1]), int(row[2]), int(row[3]), reason))
+            if invalid_row_policy == "error":
+                raise ValueError(
+                    f"{int(row[0])}-{int(row[1]):03d} {int(row[2]):02d}:{int(row[3]):02d}: {reason}"
+                )
+            continue
+        try:
+            total += footprint_for_row(row, x, y)
+            valid_count += 1
+        except ValueError as exc:
+            qc_rows.append((int(row[0]), int(row[1]), int(row[2]), int(row[3]), str(exc)))
+            if invalid_row_policy == "error":
+                raise
+    return total, valid_count, qc_rows
+
+
 def run(args: argparse.Namespace) -> int:
     log = logging.getLogger("footprint")
     rows = read_umep_input(args.input)
@@ -287,30 +364,39 @@ def run(args: argparse.Namespace) -> int:
         rows = rows[: args.limit]
     grid = Grid(args.fetch, args.resolution)
     x, y = grid.coordinates()
-    total = np.zeros((grid.size, grid.size), dtype=np.float64)
-    valid_count = 0
-    qc_rows: list[tuple[int, int, int, int, str]] = []
-
     log.info(
-        "Loaded %d rows; grid %dx%d at %.2f m (%.1f m fetch)",
-        len(rows), grid.size, grid.size, grid.resolution, grid.fetch,
+        "Loaded %d rows; grid %dx%d at %.2f m (%.1f m fetch); workers=%d",
+        len(rows), grid.size, grid.size, grid.resolution, grid.fetch, args.workers,
     )
-    for index, row in enumerate(rows, start=1):
-        reason = validate_row(row)
-        if reason:
-            qc_rows.append((int(row[0]), int(row[1]), int(row[2]), int(row[3]), reason))
-            if args.invalid_row_policy == "error":
-                raise ValueError(f"row {index}: {reason}")
-            continue
-        try:
-            total += footprint_for_row(row, x, y)
-            valid_count += 1
-        except ValueError as exc:
-            qc_rows.append((int(row[0]), int(row[1]), int(row[2]), int(row[3]), str(exc)))
-            if args.invalid_row_policy == "error":
-                raise ValueError(f"row {index}: {exc}") from exc
-        if index % args.log_every == 0 or index == len(rows):
-            log.info("Processed %d/%d rows (%d valid, %d skipped)", index, len(rows), valid_count, len(qc_rows))
+    if args.workers == 1 or len(rows) < 2:
+        total, valid_count, qc_rows = _process_rows(
+            rows, x, y, args.invalid_row_policy
+        )
+    else:
+        # Several fairly large chunks reduce scheduling overhead and bound the
+        # number of per-worker accumulation grids held in memory.
+        chunk_count = min(len(rows), args.workers * 4)
+        chunks = [chunk for chunk in np.array_split(rows, chunk_count) if len(chunk)]
+        total = np.zeros(x.shape, dtype=np.float64)
+        valid_count = 0
+        qc_rows = []
+        processed = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(_process_rows, chunk, x, y, args.invalid_row_policy): len(chunk)
+                for chunk in chunks
+            }
+            for future in as_completed(futures):
+                partial, valid, qc = future.result()
+                total += partial
+                valid_count += valid
+                qc_rows.extend(qc)
+                processed += futures[future]
+                log.info(
+                    "Processed %d/%d rows (%d valid, %d skipped)",
+                    processed, len(rows), valid_count, len(qc_rows),
+                )
+        qc_rows.sort(key=lambda item: item[:4])
 
     if not valid_count:
         raise ValueError("no valid footprints were calculated")
@@ -355,6 +441,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-prefix", type=Path, default=Path("output/standalone_footprint"))
     parser.add_argument("--invalid-row-policy", choices=("skip", "error"), default="skip")
     parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(4, os.cpu_count() or 1),
+        help="Parallel footprint workers (default: up to 4; use 1 for sequential)",
+    )
     parser.add_argument("--limit", type=int, help="Only process the first N rows (for testing)")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
@@ -362,6 +454,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--fetch and --resolution must be positive")
     if args.log_every <= 0:
         parser.error("--log-every must be positive")
+    if args.workers <= 0:
+        parser.error("--workers must be positive")
     return args
 
 

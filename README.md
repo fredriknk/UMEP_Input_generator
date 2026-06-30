@@ -298,6 +298,18 @@ same-basename styles when the GeoTIFFs are added: the percentage raster uses
 UMEP's red-to-blue footprint ramp and transparency, while the density raster
 uses a transparent heatmap based on its calculated maximum.
 
+Footprints are calculated in parallel using up to four workers by default.
+Use `--workers 1` for deterministic sequential benchmarking, or increase the
+value cautiously on machines with ample memory.
+
+For rapid tower-location screening, `--resolution 10` uses one quarter as many
+grid cells as the 5 m final product. A practical workflow is to compare all
+candidate locations at 10 m, then rerun only the shortlist at 5 m.
+
+On Windows, QGIS locks loaded GeoTIFFs. If an existing output cannot be
+replaced, the runner preserves it and automatically writes a matched new pair
+such as `footprint_run2_density.tif` and `footprint_run2_percent.tif`.
+
 The tower coordinates must use the same projected CRS supplied with `--crs`.
 For the current QGIS project (EPSG:25832), a test run using the coordinates
 shown in the project is:
