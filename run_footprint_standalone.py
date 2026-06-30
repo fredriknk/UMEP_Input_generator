@@ -16,6 +16,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -250,11 +251,20 @@ def _select_output_paths(output_prefix: Path) -> tuple[Path, Path]:
 
 
 def write_qgis_styles(
-    density_path: Path, percent_path: Path, density_max: float
+    density_path: Path,
+    percent_path: Path,
+    density_max: float,
+    display_percent: int = 80,
 ) -> tuple[Path, Path]:
     """Write same-basename QGIS styles so newly added rasters render usefully."""
     density_qml = density_path.with_suffix(".qml")
     percent_qml = percent_path.with_suffix(".qml")
+    ramp_values = (
+        max(1, round(display_percent * 0.25)),
+        max(1, round(display_percent * 0.50)),
+        max(1, round(display_percent * 0.75)),
+    )
+    hidden_minimum = display_percent + 1
     # Closely follows UMEP/FootprintModel/footprint_style.qml. QGIS interprets
     # alpha in the ramp as per-cell transparency and renderer opacity globally.
     percent_qml.write_text(
@@ -266,17 +276,17 @@ def write_qgis_styles(
       <rasterTransparency>
         <singleValuePixelList>
           <pixelListEntry min="0" max="0" percentTransparent="100"/>
-          <pixelListEntry min="98" max="100" percentTransparent="100"/>
+          <pixelListEntry min="{hidden_minimum}" max="100" percentTransparent="100"/>
         </singleValuePixelList>
       </rasterTransparency>
       <rastershader>
         <colorrampshader colorRampType="INTERPOLATED" clip="0"
                          classificationMode="1" minimumValue="1" maximumValue="100">
           <item alpha="255" value="1" label="Highest contribution" color="#d7191c"/>
-          <item alpha="255" value="25" label="25%" color="#fdae61"/>
-          <item alpha="255" value="50" label="50%" color="#ffffbf"/>
-          <item alpha="255" value="75" label="75%" color="#abdda4"/>
-          <item alpha="255" value="97" label="97%" color="#2b83ba"/>
+          <item alpha="255" value="{ramp_1}" label="{ramp_1}%" color="#fdae61"/>
+          <item alpha="255" value="{ramp_2}" label="{ramp_2}%" color="#ffffbf"/>
+          <item alpha="255" value="{ramp_3}" label="{ramp_3}%" color="#abdda4"/>
+          <item alpha="255" value="{display_percent}" label="{display_percent}% boundary" color="#2b83ba"/>
           <rampLegendSettings direction="0" minimumLabel="High" maximumLabel="Low"/>
         </colorrampshader>
       </rastershader>
@@ -287,7 +297,13 @@ def write_qgis_styles(
   </pipe>
   <blendMode>0</blendMode>
 </qgis>
-""",
+""".format(
+            display_percent=display_percent,
+            hidden_minimum=hidden_minimum,
+            ramp_1=ramp_values[0],
+            ramp_2=ramp_values[1],
+            ramp_3=ramp_values[2],
+        ),
         encoding="utf-8",
     )
     maximum = max(float(density_max), np.finfo(np.float32).tiny)
@@ -333,10 +349,16 @@ def _process_rows(
     x: np.ndarray,
     y: np.ndarray,
     invalid_row_policy: str,
-) -> tuple[np.ndarray, int, list[tuple[int, int, int, int, str]]]:
+    placement_analysis: bool = False,
+    growing_months: frozenset[int] = frozenset(range(4, 11)),
+) -> tuple[
+    dict[str, np.ndarray],
+    dict[str, int],
+    list[tuple[int, int, int, int, str]],
+]:
     """Calculate one independent row chunk for sequential or threaded use."""
-    total = np.zeros(x.shape, dtype=np.float64)
-    valid_count = 0
+    totals: dict[str, np.ndarray] = {"annual": np.zeros(x.shape, dtype=np.float64)}
+    counts: dict[str, int] = {"annual": 0}
     qc_rows: list[tuple[int, int, int, int, str]] = []
     for row in rows:
         reason = validate_row(row)
@@ -348,13 +370,41 @@ def _process_rows(
                 )
             continue
         try:
-            total += footprint_for_row(row, x, y)
-            valid_count += 1
+            footprint = footprint_for_row(row, x, y)
+            labels = ["annual"]
+            if placement_analysis:
+                labels.extend(_placement_labels(row, growing_months))
+            for label in labels:
+                if label not in totals:
+                    totals[label] = np.zeros(x.shape, dtype=np.float64)
+                    counts[label] = 0
+                totals[label] += footprint
+                counts[label] += 1
         except ValueError as exc:
             qc_rows.append((int(row[0]), int(row[1]), int(row[2]), int(row[3]), str(exc)))
             if invalid_row_policy == "error":
                 raise
-    return total, valid_count, qc_rows
+    return totals, counts, qc_rows
+
+
+def _placement_labels(row: np.ndarray, growing_months: frozenset[int]) -> tuple[str, str, str]:
+    """Return season, stability, and meteorological wind-sector labels."""
+    year, day_of_year = int(row[0]), int(row[1])
+    month = (datetime(year, 1, 1) + timedelta(days=day_of_year - 1)).month
+    season = "growing" if month in growing_months else "dormant"
+
+    zm = row[6] - row[5]
+    stability_value = zm / row[8]
+    if stability_value < -0.05:
+        stability = "unstable"
+    elif stability_value > 0.05:
+        stability = "stable"
+    else:
+        stability = "neutral"
+
+    directions = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+    sector = directions[int(((row[10] % 360.0) + 22.5) // 45.0) % 8]
+    return season, f"stability_{stability}", f"wind_{sector}"
 
 
 def run(args: argparse.Namespace) -> int:
@@ -364,50 +414,60 @@ def run(args: argparse.Namespace) -> int:
         rows = rows[: args.limit]
     grid = Grid(args.fetch, args.resolution)
     x, y = grid.coordinates()
+    growing_months = frozenset(args.growing_months)
     log.info(
         "Loaded %d rows; grid %dx%d at %.2f m (%.1f m fetch); workers=%d",
         len(rows), grid.size, grid.size, grid.resolution, grid.fetch, args.workers,
     )
     if args.workers == 1 or len(rows) < 2:
-        total, valid_count, qc_rows = _process_rows(
-            rows, x, y, args.invalid_row_policy
+        totals, counts, qc_rows = _process_rows(
+            rows, x, y, args.invalid_row_policy,
+            args.placement_analysis, growing_months,
         )
     else:
         # Several fairly large chunks reduce scheduling overhead and bound the
         # number of per-worker accumulation grids held in memory.
         chunk_count = min(len(rows), args.workers * 4)
         chunks = [chunk for chunk in np.array_split(rows, chunk_count) if len(chunk)]
-        total = np.zeros(x.shape, dtype=np.float64)
-        valid_count = 0
+        totals: dict[str, np.ndarray] = {}
+        counts: dict[str, int] = {}
         qc_rows = []
         processed = 0
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(_process_rows, chunk, x, y, args.invalid_row_policy): len(chunk)
+                executor.submit(
+                    _process_rows, chunk, x, y, args.invalid_row_policy,
+                    args.placement_analysis, growing_months,
+                ): len(chunk)
                 for chunk in chunks
             }
             for future in as_completed(futures):
-                partial, valid, qc = future.result()
-                total += partial
-                valid_count += valid
+                partial_totals, partial_counts, qc = future.result()
+                for label, partial in partial_totals.items():
+                    if label not in totals:
+                        totals[label] = np.zeros(x.shape, dtype=np.float64)
+                        counts[label] = 0
+                    totals[label] += partial
+                    counts[label] += partial_counts[label]
                 qc_rows.extend(qc)
                 processed += futures[future]
                 log.info(
                     "Processed %d/%d rows (%d valid, %d skipped)",
-                    processed, len(rows), valid_count, len(qc_rows),
+                    processed, len(rows), counts.get("annual", 0), len(qc_rows),
                 )
         qc_rows.sort(key=lambda item: item[:4])
 
+    valid_count = counts.get("annual", 0)
     if not valid_count:
         raise ValueError("no valid footprints were calculated")
-    climatology = total / valid_count
+    climatology = totals["annual"] / valid_count
     percent, captured_mass = contribution_percent_raster(climatology, grid.resolution)
     density_path, percent_path = write_geotiffs(
         args.output_prefix, climatology, percent, grid,
         args.tower_x, args.tower_y, args.crs,
     )
     density_qml, percent_qml = write_qgis_styles(
-        density_path, percent_path, float(climatology.max())
+        density_path, percent_path, float(climatology.max()), args.display_percent
     )
 
     qc_path = args.output_prefix.with_name(args.output_prefix.name + "_qc.csv")
@@ -425,6 +485,52 @@ def run(args: argparse.Namespace) -> int:
     )
     if captured_mass < 0.8:
         log.warning("Less than 80%% of the modelled mass is inside the selected fetch")
+
+    if args.placement_analysis:
+        summary_path = args.output_prefix.with_name(
+            args.output_prefix.name + "_placement_summary.csv"
+        )
+        summary_rows = [
+            ("annual", valid_count, captured_mass,
+             int(np.count_nonzero((percent > 0) & (percent <= 80))) * grid.resolution**2)
+        ]
+        preferred_order = (
+            "growing", "dormant",
+            "stability_unstable", "stability_neutral", "stability_stable",
+            "wind_N", "wind_NE", "wind_E", "wind_SE",
+            "wind_S", "wind_SW", "wind_W", "wind_NW",
+        )
+        for label in preferred_order:
+            count = counts.get(label, 0)
+            if not count:
+                continue
+            category = totals[label] / count
+            category_percent, mass = contribution_percent_raster(
+                category, grid.resolution
+            )
+            category_prefix = args.output_prefix.with_name(
+                args.output_prefix.name + "_" + label
+            )
+            category_density, category_percent_path = write_geotiffs(
+                category_prefix, category, category_percent, grid,
+                args.tower_x, args.tower_y, args.crs,
+            )
+            write_qgis_styles(
+                category_density, category_percent_path, float(category.max()),
+                args.display_percent,
+            )
+            area80 = (
+                int(np.count_nonzero(
+                    (category_percent > 0) & (category_percent <= 80)
+                ))
+                * grid.resolution**2
+            )
+            summary_rows.append((label, count, mass, area80))
+        with summary_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(("category", "valid_hours", "captured_mass", "area80_m2"))
+            writer.writerows(summary_rows)
+        log.info("Wrote placement analysis and %s", summary_path)
     return 0
 
 
@@ -447,6 +553,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=min(4, os.cpu_count() or 1),
         help="Parallel footprint workers (default: up to 4; use 1 for sequential)",
     )
+    parser.add_argument(
+        "--placement-analysis",
+        action="store_true",
+        help="Also write growing/dormant, stability, and eight wind-sector climatologies",
+    )
+    parser.add_argument(
+        "--display-percent",
+        type=int,
+        default=80,
+        help="QGIS style displays this cumulative footprint percentage (default: 80)",
+    )
+    parser.add_argument(
+        "--growing-months",
+        default="4-10",
+        help="Growing-season months, e.g. 4-10 or 4,5,6,7,8,9,10 (default: 4-10)",
+    )
     parser.add_argument("--limit", type=int, help="Only process the first N rows (for testing)")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args(argv)
@@ -456,7 +578,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--log-every must be positive")
     if args.workers <= 0:
         parser.error("--workers must be positive")
+    if not 1 <= args.display_percent <= 100:
+        parser.error("--display-percent must be between 1 and 100")
+    try:
+        args.growing_months = parse_months(args.growing_months)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
+
+
+def parse_months(value: str) -> tuple[int, ...]:
+    """Parse comma-separated months and inclusive ranges."""
+    months: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            start, end = int(start_text), int(end_text)
+            if start > end:
+                raise ValueError("growing-month ranges must be ascending")
+            months.update(range(start, end + 1))
+        else:
+            months.add(int(part))
+    if not months or any(month < 1 or month > 12 for month in months):
+        raise ValueError("growing months must be between 1 and 12")
+    return tuple(sorted(months))
 
 
 def main(argv: list[str] | None = None) -> int:

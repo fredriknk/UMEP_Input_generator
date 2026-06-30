@@ -310,6 +310,19 @@ On Windows, QGIS locks loaded GeoTIFFs. If an existing output cannot be
 replaced, the runner preserves it and automatically writes a matched new pair
 such as `footprint_run2_density.tif` and `footprint_run2_percent.tif`.
 
+For tower siting, add `--placement-analysis`. The hourly footprints are still
+calculated only once, but are accumulated into annual, growing/dormant,
+stable/neutral/unstable, and eight wind-sector climatologies. A
+`footprint_placement_summary.csv` compares valid hours, captured mass, and 80%
+source-area size. The growing season defaults to April–October and can be
+changed with `--growing-months`, for example `--growing-months 5-9`.
+For multi-tower batch runs, these summaries are also collected into
+`placement_comparison.csv` in the batch output directory.
+
+The QGIS percentage style is visually clipped to the 80% cumulative source
+area by default, while the GeoTIFF retains all values. Change the display
+boundary with `--display-percent 90` (or another value from 1 to 100).
+
 The tower coordinates must use the same projected CRS supplied with `--crs`.
 For the current QGIS project (EPSG:25832), a test run using the coordinates
 shown in the project is:

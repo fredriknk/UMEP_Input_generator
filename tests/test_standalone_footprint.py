@@ -12,6 +12,8 @@ from run_footprint_standalone import (
     validate_row,
     write_qgis_styles,
     _select_output_paths,
+    _placement_labels,
+    parse_months,
 )
 
 
@@ -52,6 +54,7 @@ class StandaloneFootprintTests(unittest.TestCase):
             density_qml, percent_qml = write_qgis_styles(density, percent, 0.01)
             self.assertIn("singlebandpseudocolor", density_qml.read_text())
             self.assertIn("#d7191c", percent_qml.read_text())
+            self.assertIn('min="81" max="100"', percent_qml.read_text())
             self.assertEqual(density_qml.name, "footprint_density.qml")
 
     def test_selects_normal_output_names_when_available(self):
@@ -67,6 +70,19 @@ class StandaloneFootprintTests(unittest.TestCase):
                 density, percent = _select_output_paths(prefix)
             self.assertEqual(density.name, "footprint_run2_density.tif")
             self.assertEqual(percent.name, "footprint_run2_percent.tif")
+
+    def test_placement_labels(self):
+        row = sample_row()
+        row[1] = 180
+        row[8] = -20
+        row[10] = 46
+        self.assertEqual(
+            _placement_labels(row, frozenset(range(4, 11))),
+            ("growing", "stability_unstable", "wind_NE"),
+        )
+
+    def test_parse_growing_months(self):
+        self.assertEqual(parse_months("4-6,9"), (4, 5, 6, 9))
 
 
 if __name__ == "__main__":

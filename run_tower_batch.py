@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
 from pathlib import Path
@@ -36,6 +37,15 @@ def parser() -> argparse.ArgumentParser:
         "--workers", type=int, default=min(4, os.cpu_count() or 1),
         help="Parallel footprint workers per tower (default: up to 4)",
     )
+    result.add_argument(
+        "--placement-analysis", action="store_true",
+        help="Write seasonal, stability, and wind-sector outputs for siting decisions",
+    )
+    result.add_argument("--growing-months", default="4-10")
+    result.add_argument(
+        "--display-percent", type=int, default=80,
+        help="Visible cumulative footprint percentage in QGIS styles",
+    )
     result.add_argument("--start")
     result.add_argument("--end")
     result.add_argument("--invalid-row-policy", choices=("skip", "error"), default="skip")
@@ -57,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     import rasterio
     with rasterio.open(args.dom) as source:
         raster_crs = source.crs.to_string()
+    comparison_rows: list[dict[str, str]] = []
     for original_tower in towers:
         tower = project_tower(original_tower, raster_crs)
         name = safe_name(tower.name)
@@ -95,13 +106,40 @@ def main(argv: list[str] | None = None) -> int:
                 "--crs", crs, "--fetch", str(args.fetch), "--resolution", str(args.resolution),
                 "--output-prefix", str(footprint_prefix), "--invalid-row-policy", args.invalid_row_policy,
                 "--workers", str(args.workers),
+                "--display-percent", str(args.display_percent),
             ]
+            if args.placement_analysis:
+                footprint_args += [
+                    "--placement-analysis",
+                    "--growing-months", args.growing_months,
+                ]
             if run_footprint(footprint_args):
                 raise RuntimeError("footprint calculation failed")
+            if args.placement_analysis:
+                summary_path = footprint_prefix.with_name(
+                    footprint_prefix.name + "_placement_summary.csv"
+                )
+                with summary_path.open(encoding="utf-8", newline="") as handle:
+                    for row in csv.DictReader(handle):
+                        comparison_rows.append(
+                            {
+                                "tower_id": tower.name,
+                                "tower_x": f"{tower.x:.3f}",
+                                "tower_y": f"{tower.y:.3f}",
+                                **row,
+                            }
+                        )
             print(f"{tower.name}: complete -> {folder}")
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"error: {tower.name}: {exc}", file=sys.stderr)
             return 1
+    if args.placement_analysis and comparison_rows:
+        comparison_path = args.output_dir / "placement_comparison.csv"
+        with comparison_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=comparison_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(comparison_rows)
+        print(f"Placement comparison: {comparison_path}")
     return 0
 
 
