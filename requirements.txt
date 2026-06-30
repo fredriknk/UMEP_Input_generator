@@ -1,0 +1,15 @@
+# Copernicus Climate Data Store API client
+cdsapi==0.7.7
+
+# Reading ERA5 NetCDF files and vectorized meteorological calculations
+netCDF4>=1.7,<2.0
+numpy>=1.26,<3.0
+
+# Standalone georeferenced footprint rasters
+rasterio>=1.3,<2.0
+
+# UMEP-compatible nearest-neighbour rotations for directional morphometry
+scipy>=1.11,<2.0
+
+# Flux-tower shapefile geometry and attributes
+pyshp>=2.3,<3.0

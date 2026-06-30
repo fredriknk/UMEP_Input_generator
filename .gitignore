@@ -1,0 +1,28 @@
+# Local Python environments
+.venv/
+venv/
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.cdsapirc
+
+# Generated model output and large ERA5 downloads
+output/
+era_5_weatherdata/*.nc
+era_5_weatherdata/*.nc4
+era_5_weatherdata/*.grib
+era_5_weatherdata/*.grib2
+era_5_weatherdata/*.zip
+local_weatherdata/merged_footprint_weather_*.csv
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,382 @@
+#!/usr/bin/env python
+"""Standalone Kljun et al. (2015) footprint climatology runner.
+
+The numerical parameterisation follows the FFP implementation distributed with
+UMEP, separated from QGIS and its GUI. Input is the 13-column UMEP Source Area
+(Point) meteorological file produced by generate_umep_footprint_input.py.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import logging
+import math
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+
+HEADER = (
+    "iy", "id", "it", "imin", "z_0_input", "z_d_input", "z_m_input",
+    "sigv", "Obukhov", "ustar", "dir", "h", "por",
+)
+
+
+@dataclass(frozen=True)
+class Grid:
+    fetch: float
+    resolution: float
+
+    @property
+    def size(self) -> int:
+        return int(math.ceil(2 * self.fetch / self.resolution))
+
+    def coordinates(self) -> tuple[np.ndarray, np.ndarray]:
+        n = self.size
+        axis = -self.fetch + (np.arange(n, dtype=np.float64) + 0.5) * self.resolution
+        return np.meshgrid(axis, axis)
+
+
+def read_umep_input(path: Path) -> np.ndarray:
+    with path.open("r", encoding="utf-8-sig") as handle:
+        first = handle.readline().strip().split()
+    if tuple(first) != HEADER:
+        raise ValueError(
+            f"unexpected header in {path}; expected exactly: {' '.join(HEADER)}"
+        )
+    data = np.loadtxt(path, skiprows=1, ndmin=2)
+    if data.shape[1] != len(HEADER):
+        raise ValueError(f"{path} has {data.shape[1]} columns; expected 13")
+    if not np.isfinite(data).all():
+        raise ValueError(f"{path} contains NaN or infinite values")
+    return data
+
+
+def validate_row(row: np.ndarray) -> str | None:
+    z0, zd, zag, sigv, ol, ustar, wind_dir, pblh = row[4:12]
+    zm = zag - zd
+    if z0 <= 0:
+        return "z0_not_positive"
+    if zm <= 0:
+        return "effective_height_not_positive"
+    if ustar <= 0.1:
+        return "ustar_not_above_0.1"
+    if sigv <= 0:
+        return "sigv_not_positive"
+    if pblh <= 10:
+        return "boundary_layer_not_above_10m"
+    if zm >= pblh:
+        return "measurement_above_boundary_layer"
+    if not 0 <= wind_dir <= 360:
+        return "wind_direction_out_of_range"
+    if abs(ol) < 1e-9:
+        return "obukhov_zero"
+    return None
+
+
+def footprint_for_row(
+    row: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray:
+    """Return footprint density [m-2] on a tower-centred grid."""
+    z0, zd, zag, sigv, ol, ustar, wind_dir, pblh = row[4:12]
+    zm = zag - zd
+
+    a, b, c, d = 1.4524, -1.9914, 1.4622, 0.1359
+    ac, bc, cc = 2.17, 1.66, 20.0
+    neutral_limit = 5000.0
+
+    rho = np.hypot(x, y)
+    theta = np.arctan2(x, y) - wind_dir * np.pi / 180.0
+    alongwind = rho * np.cos(theta)
+    crosswind = rho * np.sin(theta)
+
+    if ol <= 0 or ol >= neutral_limit:
+        xx = (1.0 - 19.0 * zm / ol) ** 0.25
+        psi_f = (
+            np.log((1.0 + xx**2) / 2.0)
+            + 2.0 * np.log((1.0 + xx) / 2.0)
+            - 2.0 * np.arctan(xx)
+            + np.pi / 2.0
+        )
+    else:
+        psi_f = -5.3 * zm / ol
+
+    denominator = np.log(zm / z0) - psi_f
+    if denominator <= 0:
+        raise ValueError("non-positive logarithmic wind-profile denominator")
+
+    height_factor = 1.0 - zm / pblh
+    xstar = alongwind / zm * height_factor / denominator
+    valid = xstar > d
+
+    result = np.zeros_like(x, dtype=np.float64)
+    if not np.any(valid):
+        return result
+
+    shifted = xstar[valid] - d
+    fstar_ci = a * shifted**b * np.exp(-c / shifted)
+    f_ci = fstar_ci / zm * height_factor / denominator
+    sigystar = ac * np.sqrt(bc * np.abs(xstar[valid]) ** 2 / (1 + cc * np.abs(xstar[valid])))
+
+    ol_for_scale = -1e6 if abs(ol) > neutral_limit else ol
+    base = 0.80 if ol_for_scale <= 0 else 0.55
+    scale_const = min(1.0, 1e-5 / abs(zm / ol_for_scale) + base)
+    sigy = sigystar / scale_const * zm * sigv / ustar
+
+    result[valid] = (
+        f_ci
+        / (np.sqrt(2 * np.pi) * sigy)
+        * np.exp(-(crosswind[valid] ** 2) / (2 * sigy**2))
+    )
+    result[~np.isfinite(result)] = 0
+    return result
+
+
+def contribution_percent_raster(
+    footprint: np.ndarray, resolution: float
+) -> tuple[np.ndarray, float]:
+    """Return cumulative percent rank (1..100) and mass captured by the domain."""
+    cell_mass = np.maximum(footprint, 0) * resolution**2
+    total = float(cell_mass.sum())
+    ranks = np.zeros(footprint.shape, dtype=np.uint8)
+    if total <= 0:
+        return ranks, 0.0
+    flat = cell_mass.ravel()
+    order = np.argsort(flat)[::-1]
+    cumulative = np.cumsum(flat[order]) / total
+    values = np.minimum(100, np.maximum(1, np.ceil(cumulative * 100))).astype(np.uint8)
+    ranks.ravel()[order] = values
+    ranks.ravel()[flat == 0] = 0
+    return ranks, total
+
+
+def write_geotiffs(
+    output_prefix: Path,
+    footprint: np.ndarray,
+    percent: np.ndarray,
+    grid: Grid,
+    tower_x: float,
+    tower_y: float,
+    crs: str,
+) -> tuple[Path, Path]:
+    try:
+        import rasterio
+        from rasterio.transform import from_origin
+    except ImportError as exc:
+        raise RuntimeError(
+            "rasterio is required; run: python -m pip install -r requirements.txt"
+        ) from exc
+
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    transform = from_origin(
+        tower_x - grid.fetch,
+        tower_y + grid.fetch,
+        grid.resolution,
+        grid.resolution,
+    )
+    density_path = output_prefix.with_name(output_prefix.name + "_density.tif")
+    percent_path = output_prefix.with_name(output_prefix.name + "_percent.tif")
+
+    common = {
+        "driver": "GTiff",
+        "height": grid.size,
+        "width": grid.size,
+        "count": 1,
+        "crs": crs,
+        "transform": transform,
+        "compress": "deflate",
+        "tiled": True,
+    }
+    with rasterio.open(density_path, "w", dtype="float32", nodata=0.0, **common) as dst:
+        dst.write(np.flipud(footprint).astype(np.float32), 1)
+        dst.set_band_description(1, "Kljun 2015 footprint density (m-2)")
+    with rasterio.open(percent_path, "w", dtype="uint8", nodata=0, **common) as dst:
+        dst.write(np.flipud(percent), 1)
+        dst.set_band_description(1, "Cumulative contribution percentage")
+    return density_path, percent_path
+
+
+def write_qgis_styles(
+    density_path: Path, percent_path: Path, density_max: float
+) -> tuple[Path, Path]:
+    """Write same-basename QGIS styles so newly added rasters render usefully."""
+    density_qml = density_path.with_suffix(".qml")
+    percent_qml = percent_path.with_suffix(".qml")
+    # Closely follows UMEP/FootprintModel/footprint_style.qml. QGIS interprets
+    # alpha in the ramp as per-cell transparency and renderer opacity globally.
+    percent_qml.write_text(
+        """<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.34" styleCategories="Symbology">
+  <pipe>
+    <rasterrenderer type="singlebandpseudocolor" band="1" opacity="0.50"
+                    alphaBand="-1" classificationMin="1" classificationMax="100">
+      <rasterTransparency>
+        <singleValuePixelList>
+          <pixelListEntry min="0" max="0" percentTransparent="100"/>
+          <pixelListEntry min="98" max="100" percentTransparent="100"/>
+        </singleValuePixelList>
+      </rasterTransparency>
+      <rastershader>
+        <colorrampshader colorRampType="INTERPOLATED" clip="0"
+                         classificationMode="1" minimumValue="1" maximumValue="100">
+          <item alpha="255" value="1" label="Highest contribution" color="#d7191c"/>
+          <item alpha="255" value="25" label="25%" color="#fdae61"/>
+          <item alpha="255" value="50" label="50%" color="#ffffbf"/>
+          <item alpha="255" value="75" label="75%" color="#abdda4"/>
+          <item alpha="255" value="97" label="97%" color="#2b83ba"/>
+          <rampLegendSettings direction="0" minimumLabel="High" maximumLabel="Low"/>
+        </colorrampshader>
+      </rastershader>
+    </rasterrenderer>
+    <brightnesscontrast brightness="0" contrast="0" gamma="1"/>
+    <huesaturation colorizeOn="0" grayscaleMode="0" saturation="0"/>
+    <rasterresampler maxOversampling="2"/>
+  </pipe>
+  <blendMode>0</blendMode>
+</qgis>
+""",
+        encoding="utf-8",
+    )
+    maximum = max(float(density_max), np.finfo(np.float32).tiny)
+    stops = (maximum * 0.002, maximum * 0.02, maximum * 0.12, maximum * 0.45, maximum)
+    density_qml.write_text(
+        f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.34" styleCategories="Symbology">
+  <pipe>
+    <rasterrenderer type="singlebandpseudocolor" band="1" opacity="0.68"
+                    alphaBand="-1" classificationMin="0" classificationMax="{maximum:.12g}">
+      <rasterTransparency>
+        <singleValuePixelList>
+          <pixelListEntry min="0" max="0" percentTransparent="100"/>
+        </singleValuePixelList>
+      </rasterTransparency>
+      <rastershader>
+        <colorrampshader colorRampType="INTERPOLATED" clip="1"
+                         classificationMode="1" minimumValue="0" maximumValue="{maximum:.12g}">
+          <item alpha="0" value="0" label="No contribution" color="#2b83ba"/>
+          <item alpha="90" value="{stops[0]:.12g}" label="Very low" color="#2b83ba"/>
+          <item alpha="145" value="{stops[1]:.12g}" label="Low" color="#abdda4"/>
+          <item alpha="185" value="{stops[2]:.12g}" label="Moderate" color="#ffffbf"/>
+          <item alpha="225" value="{stops[3]:.12g}" label="High" color="#fdae61"/>
+          <item alpha="255" value="{stops[4]:.12g}" label="Peak contribution" color="#d7191c"/>
+          <rampLegendSettings direction="0" minimumLabel="Low" maximumLabel="High"/>
+        </colorrampshader>
+      </rastershader>
+    </rasterrenderer>
+    <brightnesscontrast brightness="0" contrast="0" gamma="1"/>
+    <huesaturation colorizeOn="0" grayscaleMode="0" saturation="0"/>
+    <rasterresampler maxOversampling="2"/>
+  </pipe>
+  <blendMode>0</blendMode>
+</qgis>
+""",
+        encoding="utf-8",
+    )
+    return density_qml, percent_qml
+
+
+def run(args: argparse.Namespace) -> int:
+    log = logging.getLogger("footprint")
+    rows = read_umep_input(args.input)
+    if args.limit is not None:
+        rows = rows[: args.limit]
+    grid = Grid(args.fetch, args.resolution)
+    x, y = grid.coordinates()
+    total = np.zeros((grid.size, grid.size), dtype=np.float64)
+    valid_count = 0
+    qc_rows: list[tuple[int, int, int, int, str]] = []
+
+    log.info(
+        "Loaded %d rows; grid %dx%d at %.2f m (%.1f m fetch)",
+        len(rows), grid.size, grid.size, grid.resolution, grid.fetch,
+    )
+    for index, row in enumerate(rows, start=1):
+        reason = validate_row(row)
+        if reason:
+            qc_rows.append((int(row[0]), int(row[1]), int(row[2]), int(row[3]), reason))
+            if args.invalid_row_policy == "error":
+                raise ValueError(f"row {index}: {reason}")
+            continue
+        try:
+            total += footprint_for_row(row, x, y)
+            valid_count += 1
+        except ValueError as exc:
+            qc_rows.append((int(row[0]), int(row[1]), int(row[2]), int(row[3]), str(exc)))
+            if args.invalid_row_policy == "error":
+                raise ValueError(f"row {index}: {exc}") from exc
+        if index % args.log_every == 0 or index == len(rows):
+            log.info("Processed %d/%d rows (%d valid, %d skipped)", index, len(rows), valid_count, len(qc_rows))
+
+    if not valid_count:
+        raise ValueError("no valid footprints were calculated")
+    climatology = total / valid_count
+    percent, captured_mass = contribution_percent_raster(climatology, grid.resolution)
+    density_path, percent_path = write_geotiffs(
+        args.output_prefix, climatology, percent, grid,
+        args.tower_x, args.tower_y, args.crs,
+    )
+    density_qml, percent_qml = write_qgis_styles(
+        density_path, percent_path, float(climatology.max())
+    )
+
+    qc_path = args.output_prefix.with_name(args.output_prefix.name + "_qc.csv")
+    with qc_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("iy", "id", "it", "imin", "status"))
+        writer.writerows(qc_rows)
+
+    log.info("Wrote %s", density_path)
+    log.info("Wrote %s", percent_path)
+    log.info("Wrote QGIS styles %s and %s", density_qml, percent_qml)
+    log.info(
+        "Valid rows: %d; skipped: %d; footprint mass inside raster: %.4f",
+        valid_count, len(qc_rows), captured_mass,
+    )
+    if captured_mass < 0.8:
+        log.warning("Less than 80%% of the modelled mass is inside the selected fetch")
+    return 0
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the Kljun et al. (2015) footprint model without QGIS."
+    )
+    parser.add_argument("--input", type=Path, required=True, help="13-column UMEP input text file")
+    parser.add_argument("--tower-x", type=float, required=True, help="Tower easting in the output CRS")
+    parser.add_argument("--tower-y", type=float, required=True, help="Tower northing in the output CRS")
+    parser.add_argument("--crs", default="EPSG:25832", help="Projected CRS, default EPSG:25832")
+    parser.add_argument("--fetch", type=float, default=2000.0, help="Maximum fetch in metres")
+    parser.add_argument("--resolution", type=float, default=5.0, help="Output cell size in metres")
+    parser.add_argument("--output-prefix", type=Path, default=Path("output/standalone_footprint"))
+    parser.add_argument("--invalid-row-policy", choices=("skip", "error"), default="skip")
+    parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument("--limit", type=int, help="Only process the first N rows (for testing)")
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args(argv)
+    if args.fetch <= 0 or args.resolution <= 0:
+        parser.error("--fetch and --resolution must be positive")
+    if args.log_every <= 0:
+        parser.error("--log-every must be positive")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    try:
+        return run(args)
+    except (OSError, ValueError, RuntimeError) as exc:
+        logging.getLogger("footprint").error("%s", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
