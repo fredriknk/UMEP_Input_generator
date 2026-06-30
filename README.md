@@ -1,17 +1,31 @@
 # UMEP Source Area input generator
 
-This project converts directional output from UMEP's **Morphometric
-Calculator (Point)** and time-series weather data into the 13-column input
-format used by **Urban Morphology: Source Area (Point)**:
+This project runs the UMEP Source Area workflow without QGIS. Given full-
+resolution DOM/DTM rasters, flux-tower points, hourly weather, and a crop-
+height schedule, it calculates directional Kanda morphometry, creates the
+13-column UMEP input, runs the Kljun footprint model, and writes styled
+GeoTIFFs and tower-placement summaries:
 
 ```text
 iy id it imin z_0_input z_d_input z_m_input sigv Obukhov ustar dir h por
 ```
 
-The script uses the wind direction for each weather record to circularly
-interpolate `z0` and `zd` from the anisotropic morphometric file. It accepts
-either comma-separated weather data (including ERA5 `valid_time,u10,v10,...`)
-or UMEP-style whitespace-separated weather data.
+The columns are populated as follows:
+
+| Column | Source |
+|---|---|
+| `iy id it imin` | Calculated from each weather timestamp |
+| `z_0_input`, `z_d_input` | DOM−DTM directional morphometry and UMEP Kanda method; zero-object sectors use the dated crop schedule |
+| `z_m_input` | Tower height supplied in the point CSV or with `--measurement-height` |
+| `sigv` | Sonic-anemometer input when available; otherwise an explicit approximation such as `--sigma-v-ustar-ratio 2.0` |
+| `Obukhov`, `ustar` | Calculated by `merge_footprint_weather.py` from ERA5 turbulent flux and stress fields |
+| `dir` | Local Frost wind direction, with ERA5/local-file fallback |
+| `h` | ERA5 boundary-layer height |
+| `por` | User setting, default 60% |
+
+`generate_umep_footprint_input.py` remains available as the lower-level
+converter. It circularly interpolates directional `z0` and `zd` for every
+weather record.
 
 ## Python environment
 
@@ -80,35 +94,34 @@ harvest date. Winter wheat needs a different schedule.
 effective measurement height = z_m_input - z_d_input
 ```
 
-Consequently, a sensor at 2 m is not valid with the included morphology:
-directional displacement heights are mostly around 8–14 m. The Kljun model
-also requires the sensor to be above the roughness sublayer:
+The Kljun model also requires the sensor to be above the roughness sublayer:
 
 ```text
 z_m_input > z_d_input + 12.5 * z_0_input
 ```
 
-The generator checks these constraints and does not write an invalid file.
-If "2 m" means 2 m above a roof or tower platform, pass the total sensor
-height above local ground—not 2 m.
+The generator checks these constraints for every hour. In the current Sørås
+200 m calculation, the maximum object-sector displacement height is about
+0.98 m and maximum object-sector `z0` is about 0.058 m, so a 2 m sensor passes
+that sector's roughness-sublayer test. These values are recalculated for every
+candidate and depend on tower position, search radius, and raster data.
 
 ## Meteorological requirements
 
-The Source Area model needs values that cannot be recovered from hourly mean
-10 m wind alone:
+The merged-weather workflow calculates or retrieves most required inputs:
 
-- lateral wind standard deviation (`sigv`), ideally from the sonic anemometer;
-- friction velocity (`ustar`), ideally from eddy-covariance data;
-- Obukhov length, ideally from eddy-covariance data or suitable ERA5 flux and
-  stress fields;
-- boundary-layer height (`h`) for Kljun, available as ERA5 `blh`.
+- `ustar` from ERA5 surface stress and air density;
+- Obukhov length from ERA5 turbulent heat/moisture fluxes, stress,
+  temperature, humidity, and pressure;
+- boundary-layer height (`h`) from ERA5 `blh`;
+- wind direction preferentially from local Frost observations.
 
-If the weather file contains columns named `sigv`, `ustar`, `Obukhov`, and
-`blh`/`h`, they are used directly. Otherwise an explicit fallback must be
-supplied. Fallbacks are useful for sensitivity tests, not as observational
-substitutes.
+`sigv` is the important remaining quantity absent from hourly Frost/ERA5
+products. It should ideally come from a sonic anemometer. Until then,
+`--sigma-v-ustar-ratio 2.0` is an explicit sensitivity assumption. Direct
+weather-file values take precedence when supplied.
 
-## Usage
+## Low-level input-generation usage
 
 Inspect all options:
 
@@ -116,8 +129,8 @@ Inspect all options:
 python .\generate_umep_footprint_input.py --help
 ```
 
-Example using explicit, provisional assumptions with the included raw ERA5
-CSV (replace `50` with the actual sensor height above ground):
+This is a low-level sensitivity example using fixed provisional assumptions.
+The batch workflow documented below is preferred for production runs.
 
 ```powershell
 python .\generate_umep_footprint_input.py `
@@ -134,31 +147,6 @@ python .\generate_umep_footprint_input.py `
   --end 2026-01-01 `
   --porosity 60
 ```
-
-For the 200 m agricultural morphology and a 2 m sensor:
-
-```powershell
-python .\generate_umep_footprint_input.py `
-  --morphology .\morphometric_data\200m_IMPPoint_anisotropic.txt `
-  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_example_2025.csv `
-  --weather .\era_5_weatherdata\59.66024225482937N10.78266480752292E-2025-sfc.csv `
-  --output .\output\umep_source_area_crop_2025.txt `
-  --measurement-height 2 `
-  --model kljun `
-  --friction-velocity 0.30 `
-  --sigma-v 0.60 `
-  --obukhov 1000000 `
-  --boundary-layer-height 1000 `
-  --start 2025-01-01 `
-  --end 2026-01-01 `
-  --invalid-row-policy skip
-```
-
-The nonzero northeast sector in the included 200 m morphology has
-`zd=2.27 m`, above the 2 m sensor. Weather records whose footprint uses that
-obstructed sector fail physical validation. `--invalid-row-policy skip`
-omits and counts these records rather than disguising the sector as crop.
-Without this option, the default policy stops with an error.
 
 Here, `ustar = 0.30 m/s`, `sigv = 0.60 m/s`, near-neutral `Obukhov =
 1,000,000 m`, and `h = 1,000 m` are deliberately visible assumptions. A
@@ -301,6 +289,8 @@ uses a transparent heatmap based on its calculated maximum.
 Footprints are calculated in parallel using up to four workers by default.
 Use `--workers 1` for deterministic sequential benchmarking, or increase the
 value cautiously on machines with ample memory.
+The terminal reports elapsed seconds and minutes for each footprint run,
+each tower, and the complete multi-tower batch.
 
 For rapid tower-location screening, `--resolution 10` uses one quarter as many
 grid cells as the 5 m final product. A practical workflow is to compare all

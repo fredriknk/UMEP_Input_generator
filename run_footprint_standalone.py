@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -408,6 +409,7 @@ def _placement_labels(row: np.ndarray, growing_months: frozenset[int]) -> tuple[
 
 
 def run(args: argparse.Namespace) -> int:
+    run_started = time.perf_counter()
     log = logging.getLogger("footprint")
     rows = read_umep_input(args.input)
     if args.limit is not None:
@@ -531,6 +533,11 @@ def run(args: argparse.Namespace) -> int:
             writer.writerow(("category", "valid_hours", "captured_mass", "area80_m2"))
             writer.writerows(summary_rows)
         log.info("Wrote placement analysis and %s", summary_path)
+    model_elapsed = time.perf_counter() - run_started
+    log.info(
+        "Completed %d valid footprints in %.2f s (%.1f footprints/s)",
+        valid_count, model_elapsed, valid_count / model_elapsed,
+    )
     return 0
 
 
@@ -608,16 +615,22 @@ def parse_months(value: str) -> tuple[int, ...]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    started = time.perf_counter()
     args = parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
     try:
-        return run(args)
+        result = run(args)
     except (OSError, ValueError, RuntimeError) as exc:
         logging.getLogger("footprint").error("%s", exc)
-        return 1
+        result = 1
+    elapsed = time.perf_counter() - started
+    logging.getLogger("footprint").info(
+        "Total elapsed time: %.2f s (%.2f min)", elapsed, elapsed / 60.0
+    )
+    return result
 
 
 if __name__ == "__main__":

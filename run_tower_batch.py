@@ -7,6 +7,7 @@ import argparse
 import csv
 import os
 import sys
+import time
 from pathlib import Path
 
 from calculate_morphometry import calculate_for_tower, project_tower, read_towers, safe_name, write_morphology
@@ -53,6 +54,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    batch_started = time.perf_counter()
     args = parser().parse_args(argv)
     try:
         towers = read_towers(args.towers)
@@ -69,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         raster_crs = source.crs.to_string()
     comparison_rows: list[dict[str, str]] = []
     for original_tower in towers:
+        tower_started = time.perf_counter()
         tower = project_tower(original_tower, raster_crs)
         name = safe_name(tower.name)
         folder = args.output_dir / name
@@ -129,7 +132,11 @@ def main(argv: list[str] | None = None) -> int:
                                 **row,
                             }
                         )
-            print(f"{tower.name}: complete -> {folder}")
+            tower_elapsed = time.perf_counter() - tower_started
+            print(
+                f"{tower.name}: complete in {tower_elapsed:.2f} s "
+                f"({tower_elapsed / 60.0:.2f} min) -> {folder}"
+            )
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"error: {tower.name}: {exc}", file=sys.stderr)
             return 1
@@ -140,6 +147,11 @@ def main(argv: list[str] | None = None) -> int:
             writer.writeheader()
             writer.writerows(comparison_rows)
         print(f"Placement comparison: {comparison_path}")
+    batch_elapsed = time.perf_counter() - batch_started
+    print(
+        f"Total batch time: {batch_elapsed:.2f} s "
+        f"({batch_elapsed / 60.0:.2f} min)"
+    )
     return 0
 
 
