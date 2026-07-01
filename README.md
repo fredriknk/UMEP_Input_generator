@@ -1,6 +1,6 @@
 # DISCLAIMER
 
-I AM NOT A METEOROLOGIST OR FLUID DYNAMICS EXPERT. i am just a generic engineer who wanted to run a lot of UMEP footprints to visualize tower placements. I have no formal training in atmospheric science, and I cannot guarantee in any way that this workflow is scientifically valid. Use at your own risk. I am not responsible for any consequences of using this code.
+I AM NOT A METEOROLOGIST OR FLUID DYNAMICS EXPERT. i am just a generic engineer who wanted to run a lot of footprint calculations to visualize tower placements. I have no formal training in atmospheric science, and I cannot guarantee in any way that this workflow is scientifically valid. Use at your own risk. I am not responsible for any consequences of using this code.
 
 # Standalone UMEP footprint workflow
 
@@ -8,15 +8,21 @@ This project runs the UMEP Source Area workflow. It can:
 
 1. calculate directional morphometry around one or more candidate towers from
    matching DOM and DTM rasters;
-2. apply UMEP's Kanda method 1 to obtain directional roughness length (`z0`)
+2. Estimate meterological parameters from ERA5 and local weather data, such as friction velocity, Obukhov length, and boundary-layer height;
+3. apply UMEP's Kanda et al. (2013) method to obtain directional roughness length (`z0`)
    and displacement height (`zd`);
-3. combine those values with hourly meteorology and a dated crop-height
-   schedule;
-4. run the Kljun et al. (2015) footprint parameterisation;
-5. write GeoTIFFs, automatic QGIS styles, QC records, and tower-placement
+4. combine those values with hourly meteorology and a dated crop-height
+   schedule to add seasonal roughness to the UMEP input file;
+5. run the Kljun et al. (2015) footprint parameterisation for large datasets with multiple workers in parallel. 
+6. write GeoTIFFs, automatic QGIS styles, QC records, and tower-placement
    comparison tables.
 
 The main command for normal use is `run_tower_batch.py`.
+
+An example workflow is included for a small set of flux towers in southern Oslo, Norway. It uses 2 m derivatives of the original 0.5 m DOM and DTM rasters. The original rasters are not included in this repository because they are too large.
+
+This is an example of the stable condition output from the included southern Oslo example:
+![Stable footprints around 7 towers](media/Multiple_Footprint_example.png "Stable footprint example")
 
 ## Installation
 
