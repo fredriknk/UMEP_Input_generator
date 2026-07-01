@@ -1,6 +1,6 @@
 # DISCLAIMER
 
-I AM NOT A METEOROLOGIST OR FLUID DYNAMICS EXPERT. i am just a generic engineer who wanted to run UMEP footprints for a local tower. I have no formal training in atmospheric science, and I cannot guarantee in any way that this workflow is scientifically valid. Use at your own risk. I am not responsible for any consequences of using this code.
+I AM NOT A METEOROLOGIST OR FLUID DYNAMICS EXPERT. i am just a generic engineer who wanted to run a lot of UMEP footprints to visualize tower placements. I have no formal training in atmospheric science, and I cannot guarantee in any way that this workflow is scientifically valid. Use at your own risk. I am not responsible for any consequences of using this code.
 
 # Standalone UMEP footprint workflow
 
