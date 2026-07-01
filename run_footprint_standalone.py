@@ -38,9 +38,14 @@ class Grid:
     def size(self) -> int:
         return int(math.ceil(2 * self.fetch / self.resolution))
 
+    @property
+    def extent(self) -> float:
+        """Actual symmetric half-width represented by the integer cell grid."""
+        return self.size * self.resolution / 2.0
+
     def coordinates(self) -> tuple[np.ndarray, np.ndarray]:
         n = self.size
-        axis = -self.fetch + (np.arange(n, dtype=np.float64) + 0.5) * self.resolution
+        axis = -self.extent + (np.arange(n, dtype=np.float64) + 0.5) * self.resolution
         return np.meshgrid(axis, axis)
 
 
@@ -64,8 +69,12 @@ def validate_row(row: np.ndarray) -> str | None:
     zm = zag - zd
     if z0 <= 0:
         return "z0_not_positive"
+    if zd < 0:
+        return "displacement_height_negative"
     if zm <= 0:
         return "effective_height_not_positive"
+    if zag <= zd + 12.5 * z0:
+        return "sensor_below_roughness_sublayer"
     if ustar <= 0.1:
         return "ustar_not_above_0.1"
     if sigv <= 0:
@@ -78,6 +87,8 @@ def validate_row(row: np.ndarray) -> str | None:
         return "wind_direction_out_of_range"
     if abs(ol) < 1e-9:
         return "obukhov_zero"
+    if zm / ol < -15.5:
+        return "stability_out_of_range"
     return None
 
 
@@ -180,8 +191,8 @@ def write_geotiffs(
 
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     transform = from_origin(
-        tower_x - grid.fetch,
-        tower_y + grid.fetch,
+        tower_x - grid.extent,
+        tower_y + grid.extent,
         grid.resolution,
         grid.resolution,
     )
@@ -419,7 +430,7 @@ def run(args: argparse.Namespace) -> int:
     growing_months = frozenset(args.growing_months)
     log.info(
         "Loaded %d rows; grid %dx%d at %.2f m (%.1f m fetch); workers=%d",
-        len(rows), grid.size, grid.size, grid.resolution, grid.fetch, args.workers,
+        len(rows), grid.size, grid.size, grid.resolution, grid.extent, args.workers,
     )
     if args.workers == 1 or len(rows) < 2:
         totals, counts, qc_rows = _process_rows(
@@ -486,7 +497,7 @@ def run(args: argparse.Namespace) -> int:
         valid_count, len(qc_rows), captured_mass,
     )
     if captured_mass < 0.8:
-        log.warning("Less than 80%% of the modelled mass is inside the selected fetch")
+        log.warning("Less than 80% of the modelled mass is inside the selected fetch")
 
     if args.placement_analysis:
         summary_path = args.output_prefix.with_name(
@@ -585,6 +596,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--log-every must be positive")
     if args.workers <= 0:
         parser.error("--workers must be positive")
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
     if not 1 <= args.display_percent <= 100:
         parser.error("--display-percent must be between 1 and 100")
     try:

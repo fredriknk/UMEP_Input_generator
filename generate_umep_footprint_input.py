@@ -390,6 +390,9 @@ def validate_rows(rows: list[OutputRow], model: str) -> list[str]:
         if row.sigv <= 0 or row.ustar <= 0:
             errors.append(prefix + "sigv and ustar must be positive")
         if model == "kljun":
+            if abs(row.obukhov) < 1e-9:
+                errors.append(prefix + "Kljun requires non-zero Obukhov length")
+                continue
             required = row.zd + 12.5 * row.z0
             if row.measurement_height <= required:
                 errors.append(
@@ -403,7 +406,7 @@ def validate_rows(rows: list[OutputRow], model: str) -> list[str]:
                 errors.append(prefix + "Kljun requires boundary-layer height > 10 m")
             if effective_height >= row.boundary_layer_height:
                 errors.append(prefix + "effective sensor height must be below PBL height")
-            if effective_height / row.obukhov <= -15.5:
+            if effective_height / row.obukhov < -15.5:
                 errors.append(prefix + "Kljun requires (height - zd)/Obukhov >= -15.5")
     return errors
 

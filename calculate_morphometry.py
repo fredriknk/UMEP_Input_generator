@@ -47,6 +47,8 @@ def read_towers(path: Path) -> list[Tower]:
         for number, row in enumerate(reader, start=1):
             height = float(row[height_key]) if height_key and row[height_key].strip() else None
             towers.append(Tower(row[id_key].strip() if id_key else f"tower_{number}", float(row[x_key]), float(row[y_key]), height))
+        if not towers:
+            raise ValueError(f"no tower rows found in {path}")
         return towers
 
 
@@ -165,7 +167,10 @@ def calculate_for_tower(dom_path: Path, dtm_path: Path, tower: Tower, radius: fl
             raise ValueError("DOM/DTM must use a projected CRS with metre-scale coordinates")
         tower = project_tower(tower, dom.crs.to_string())
         row, col = dom.index(tower.x, tower.y)
-        pixel_size = (abs(dom.transform.a) + abs(dom.transform.e)) / 2.0
+        pixel_width, pixel_height = abs(dom.transform.a), abs(dom.transform.e)
+        if not math.isclose(pixel_width, pixel_height, rel_tol=1e-6, abs_tol=1e-9):
+            raise ValueError("DOM/DTM pixels must be square for directional morphometry")
+        pixel_size = pixel_width
         half = int(math.ceil(radius / pixel_size))
         window = Window(col - half, row - half, 2 * half, 2 * half)
         if window.col_off < 0 or window.row_off < 0 or window.col_off + window.width > dom.width or window.row_off + window.height > dom.height:
@@ -201,7 +206,11 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    if args.radius <= 0 or args.angle_step <= 0 or 360 % args.angle_step:
+    if (
+        args.radius <= 0
+        or args.angle_step <= 0
+        or not math.isclose(360 / args.angle_step, round(360 / args.angle_step))
+    ):
         print("error: radius must be positive and angle-step must divide 360", file=sys.stderr)
         return 2
     try:

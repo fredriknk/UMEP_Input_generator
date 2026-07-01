@@ -41,6 +41,13 @@ class MorphometryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tower file not found"):
             read_towers(Path("definitely_missing_towers.csv"))
 
+    def test_empty_tower_csv_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "towers.csv"
+            path.write_text("id,x,y\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "no tower rows"):
+                read_towers(path)
+
 
 if __name__ == "__main__":
     unittest.main()

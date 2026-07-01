@@ -1,36 +1,22 @@
-# UMEP Source Area input generator
+# Standalone UMEP footprint workflow
 
-This project runs the UMEP Source Area workflow without QGIS. Given full-
-resolution DOM/DTM rasters, flux-tower points, hourly weather, and a crop-
-height schedule, it calculates directional Kanda morphometry, creates the
-13-column UMEP input, runs the Kljun footprint model, and writes styled
-GeoTIFFs and tower-placement summaries:
+This project runs the UMEP Source Area workflow without QGIS. It can:
 
-```text
-iy id it imin z_0_input z_d_input z_m_input sigv Obukhov ustar dir h por
-```
+1. calculate directional morphometry around one or more candidate towers from
+   matching DOM and DTM rasters;
+2. apply UMEP's Kanda method 1 to obtain directional roughness length (`z0`)
+   and displacement height (`zd`);
+3. combine those values with hourly meteorology and a dated crop-height
+   schedule;
+4. run the Kljun et al. (2015) footprint parameterisation;
+5. write GeoTIFFs, automatic QGIS styles, QC records, and tower-placement
+   comparison tables.
 
-The columns are populated as follows:
+The main command for normal use is `run_tower_batch.py`.
 
-| Column | Source |
-|---|---|
-| `iy id it imin` | Calculated from each weather timestamp |
-| `z_0_input`, `z_d_input` | DOM−DTM directional morphometry and UMEP Kanda method; zero-object sectors use the dated crop schedule |
-| `z_m_input` | Tower height supplied in the point CSV or with `--measurement-height` |
-| `sigv` | Sonic-anemometer input when available; otherwise an explicit approximation such as `--sigma-v-ustar-ratio 2.0` |
-| `Obukhov`, `ustar` | Calculated by `merge_footprint_weather.py` from ERA5 turbulent flux and stress fields |
-| `dir` | Local Frost wind direction, with ERA5/local-file fallback |
-| `h` | ERA5 boundary-layer height |
-| `por` | User setting, default 60% |
+## Installation
 
-`generate_umep_footprint_input.py` remains available as the lower-level
-converter. It circularly interpolates directional `z0` and `zd` for every
-weather record.
-
-## Python environment
-
-The project targets Python 3.11 and keeps dependencies in a repository-local
-virtual environment. On Windows PowerShell:
+Python 3.11 is recommended. In Windows PowerShell:
 
 ```powershell
 python -m venv .venv
@@ -39,26 +25,125 @@ python -m pip install --upgrade pip
 python -m pip install -r .\requirements.txt
 ```
 
-If PowerShell blocks activation, the environment can be used directly without
-changing execution policy:
+If activation is blocked, call the environment directly:
 
 ```powershell
-.\.venv\Scripts\python.exe .\generate_umep_footprint_input.py --help
+.\.venv\Scripts\python.exe .\run_tower_batch.py --help
 ```
 
-Run the tests inside the environment:
+Run the test suite with:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-## Agricultural fields and dated crop height
+## Recommended full workflow
 
-The UMEP morphometric calculator returns `z0=0` and `zd=0` where its DSM has no
-resolved buildings or other 3D objects. These zeros do not represent the real
-aerodynamic roughness of soil, grass, wheat, or barley.
+```powershell
+python .\run_tower_batch.py `
+  --dom .\maps\dom_soraas_extended.tif `
+  --dtm .\maps\dtm_soraas_extended.tif `
+  --towers .\maps\flux_towers.shp `
+  --weather .\local_weatherdata\merged_footprint_weather_2025.csv `
+  --measurement-height 2 `
+  --sigma-v-ustar-ratio 2.0 `
+  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_example_2025.csv `
+  --morphometry-radius 200 `
+  --fetch 2000 `
+  --resolution 5 `
+  --workers 10 `
+  --display-percent 80 `
+  --placement-analysis `
+  --start 2025-01-01 `
+  --end 2026-01-01 `
+  --output-dir .\output\placement_screening
+```
 
-Use `--crop-height-schedule` with a CSV containing:
+For a quick screening run, use `--resolution 10`. This uses one quarter of the
+grid cells of a 5 m run. Rerun shortlisted towers at 5 m.
+
+`--workers 10` is a sensible starting point for the i9-10900X used for this
+project. More workers increase memory use and may not improve throughput.
+
+### Main spatial parameters
+
+| Option | Meaning |
+|---|---|
+| `--morphometry-radius 200` | Half-width of the DOM/DTM subset around each tower. A value of 200 produces an approximately 400 x 400 m analysis window. `--morphometry-distance` is an alias. |
+| `--fetch 2000` | Requested half-width of the footprint output domain. |
+| `--resolution 5` | Footprint raster cell size in metres. |
+| `--display-percent 80` | Cumulative percentage shown by the generated QGIS style. It does not discard values from the raster. |
+| `--angle-step 5` | Direction interval used for morphometry; it must divide 360. |
+
+The output grid is always centred on the tower. If `2 * fetch` is not exactly
+divisible by the resolution, the actual symmetric extent is rounded up to the
+next complete cell.
+
+### Tower input
+
+A point shapefile or CSV can be used.
+
+CSV columns:
+
+```csv
+id,x,y,measurement_height_m
+1,599753,6615344,2.0
+2,599600,6615400,2.0
+```
+
+- `id` is optional but strongly recommended and must be unique.
+- `measurement_height_m` is optional when `--measurement-height` is supplied.
+- Shapefiles are transformed to the raster CRS using their `.prj` file.
+- CSV coordinates are assumed to already use the DOM/DTM CRS.
+- DOM and DTM must have identical CRS, transform, dimensions, square pixels,
+  and complete data inside every requested analysis window.
+
+### Batch outputs
+
+Each tower receives its own directory containing:
+
+- `morphology.txt` - directional `pai`, `fai`, height statistics, `zd`, and
+  `z0`;
+- `umep_input.txt` - hourly 13-column UMEP input;
+- `footprint_density.tif` - mean footprint density in m-2;
+- `footprint_percent.tif` - cumulative contribution rank from 1 to 100;
+- matching `.qml` files for automatic QGIS rendering;
+- `footprint_qc.csv` - skipped timestamps and rejection reasons;
+- category rasters and `footprint_placement_summary.csv` when
+  `--placement-analysis` is enabled.
+
+The batch directory also receives `placement_comparison.csv`, combining all
+tower summaries. The terminal reports elapsed time per tower and for the full
+batch.
+
+QGIS often locks loaded GeoTIFFs on Windows. If an existing raster cannot be
+replaced, the runner writes a matched pair such as
+`footprint_run2_density.tif` and `footprint_run2_percent.tif`.
+
+## What the 13 UMEP columns contain
+
+```text
+iy id it imin z_0_input z_d_input z_m_input sigv Obukhov ustar dir h por
+```
+
+| Column | Source |
+|---|---|
+| `iy id it imin` | Calculated from the hourly timestamp; `id` is day of year here, not tower ID. |
+| `z_0_input`, `z_d_input` | Directional DOM-DTM morphometry and Kanda method, with crop roughness in zero-object sectors. |
+| `z_m_input` | Measurement height above local ground. |
+| `sigv` | Direct weather value when available; otherwise an explicit fallback such as `--sigma-v-ustar-ratio 2.0`. |
+| `Obukhov`, `ustar` | Weather input, normally derived from ERA5 turbulent fluxes and stresses. |
+| `dir` | Meteorological direction from which the wind comes. |
+| `h` | Boundary-layer height, normally ERA5 `blh`. |
+| `por` | User setting, default 60 percent. It is retained for UMEP compatibility but is not used by the Kljun footprint equation. |
+
+Weather-file values take precedence over command-line fallbacks.
+
+## Crop roughness
+
+The morphometric calculator returns `z0=0` and `zd=0` in directions without
+resolved objects above 2 m. These zeros are not realistic for soil or crops.
+Supply a dated schedule:
 
 ```csv
 date,height_m
@@ -68,308 +153,181 @@ date,height_m
 2025-09-01,0.05
 ```
 
-For every weather timestamp, the generator linearly interpolates crop height
-between dated observations. In zero-object direction sectors it uses:
+Crop height is linearly interpolated by date and held at the first or last
+value outside the schedule. In zero-object sectors:
 
 ```text
 zd = (2/3) * crop height
 z0 = max(0.01 m, 0.123 * crop height)
 ```
 
-Nonzero building/tree sectors from the morphometric file are retained. The
-factors and bare-surface minimum can be changed with `--crop-zd-factor`,
-`--crop-z0-factor`, and `--minimum-z0`.
+Change these assumptions with `--crop-zd-factor`, `--crop-z0-factor`, and
+`--minimum-z0` when running the lower-level generator. The included spring
+cereal schedule is illustrative and should be replaced with observations for
+the actual crop and year.
 
-An illustrative spring-cereal schedule is included at
-`crop_schedules/south_oslo_spring_cereal_example_2025.csv`. It is a starting
-assumption, not a site observation or automatic phenology model. Replace its
-dates and heights with the actual crop, sowing date, growth observations, and
-harvest date. Winter wheat needs a different schedule.
+## Physical validation and skipped records
 
-## Important height constraint
-
-`z_m_input` is the sensor height **above ground**, but UMEP internally uses:
+For every Kljun record, the workflow checks:
 
 ```text
-effective measurement height = z_m_input - z_d_input
+effective height = measurement height - zd
+measurement height > zd + 12.5*z0
+ustar > 0.1 m/s
+boundary-layer height > 10 m
+effective height < boundary-layer height
+effective height / Obukhov >= -15.5
+Obukhov != 0
 ```
 
-The Kljun model also requires the sensor to be above the roughness sublayer:
+The batch command defaults to `--invalid-row-policy skip`. Invalid hours are
+listed in the QC CSV. Use `--invalid-row-policy error` to stop immediately.
 
-```text
-z_m_input > z_d_input + 12.5 * z_0_input
-```
+Many invalid records near forest or buildings do not mean that the footprint
+model simulated wakes. They usually mean that directional Kanda roughness
+made the nominal sensor height fall below the displacement height or
+roughness-sublayer requirement. Low `ustar` is another common cause.
 
-The generator checks these constraints for every hour. In the current Sørås
-200 m calculation, the maximum object-sector displacement height is about
-0.98 m and maximum object-sector `z0` is about 0.058 m, so a 2 m sensor passes
-that sector's roughness-sublayer test. These values are recalculated for every
-candidate and depend on tower position, search radius, and raster data.
+Reducing the morphometry radius can reduce this rejection count, but it also
+removes nearby roughness elements from the calculation. Treat radius changes
+as a sensitivity test, not as a way to force records to pass.
 
-## Meteorological requirements
+## Placement analysis
 
-The merged-weather workflow calculates or retrieves most required inputs:
+`--placement-analysis` accumulates the already calculated hourly footprints
+into:
 
-- `ustar` from ERA5 surface stress and air density;
-- Obukhov length from ERA5 turbulent heat/moisture fluxes, stress,
-  temperature, humidity, and pressure;
-- boundary-layer height (`h`) from ERA5 `blh`;
-- wind direction preferentially from local Frost observations.
+- annual;
+- growing and dormant seasons;
+- unstable, neutral, and stable conditions;
+- eight meteorological wind sectors.
 
-`sigv` is the important remaining quantity absent from hourly Frost/ERA5
-products. It should ideally come from a sonic anemometer. Until then,
-`--sigma-v-ustar-ratio 2.0` is an explicit sensitivity assumption. Direct
-weather-file values take precedence when supplied.
-
-## Low-level input-generation usage
-
-Inspect all options:
+The growing season defaults to April-October. Change it with, for example:
 
 ```powershell
-python .\generate_umep_footprint_input.py --help
+--growing-months 5-9
 ```
 
-This is a low-level sensitivity example using fixed provisional assumptions.
-The batch workflow documented below is preferred for production runs.
+`captured_mass` is the integral of the mean footprint within the output
+domain. Values near 1 indicate that the selected fetch is large enough.
+`area80_m2` is the area containing 80 percent of the mass captured by that
+domain. Compare valid-hour counts alongside footprint size: a compact annual
+footprint can be misleading when many obstructed wind sectors were rejected.
 
-```powershell
-python .\generate_umep_footprint_input.py `
-  --morphology .\morphometric_data\testkanda2_IMPPoint_anisotropic.txt `
-  --weather .\era_5_weatherdata\59.66024225482937N10.78266480752292E-2025-sfc.csv `
-  --output .\output\umep_source_area_2025.txt `
-  --measurement-height 50 `
-  --model kljun `
-  --friction-velocity 0.30 `
-  --sigma-v 0.60 `
-  --obukhov 1000000 `
-  --boundary-layer-height 1000 `
-  --start 2025-01-01 `
-  --end 2026-01-01 `
-  --porosity 60
-```
+For tower placement, the most useful next metric is usually the fraction of
+footprint contribution falling inside the intended plot polygon. That metric
+is not currently calculated by this repository.
 
-Here, `ustar = 0.30 m/s`, `sigv = 0.60 m/s`, near-neutral `Obukhov =
-1,000,000 m`, and `h = 1,000 m` are deliberately visible assumptions. A
-production file should replace them with measured or retrieved time-varying
-values. The included raw CSV extends into June 2026 despite its filename, so
-the date bounds keep this output to calendar year 2025.
-
-## Downloading additional ERA5 footprint fields
-
-`download_era5_footprint_data.py` downloads the hourly fields needed to derive
-ERA5 boundary-layer height, friction velocity, and Obukhov length. It uses the
-CDS API credentials in the standard user file:
-
-```text
-C:\Users\fnk\.cdsapirc
-```
-
-The token is neither read by this project nor included in command-line
-arguments; `cdsapi` loads it itself. Install the client once:
-
-```powershell
-python -m pip install "cdsapi>=0.7.7"
-```
-
-Inspect the request without contacting CDS:
-
-```powershell
-python .\download_era5_footprint_data.py --year 2025 --dry-run
-```
-
-Download the full year:
-
-```powershell
-python .\download_era5_footprint_data.py --year 2025
-```
-
-To stay below CDS request-cost limits, a full year is submitted as 12 monthly
-requests. Existing monthly files are skipped, so the same command safely
-resumes an interrupted download. Use `--overwrite` to replace them, or download
-one month only with `--month 1`.
-
-The site coordinates default to `59.66024225482937, 10.78266480752292` and are
-snapped to the nearest 0.25-degree ERA5 grid point (`59.75, 10.75`), matching
-the existing data. Full-year outputs are:
-
-```text
-era_5_weatherdata\era5_footprint_parameters_2025_01.nc
-...
-era_5_weatherdata\era5_footprint_parameters_2025_12.nc
-```
-
-Before the first request, log in to the CDS website, accept the ERA5 dataset
-licence, and create `.cdsapirc` from
-<https://cds.climate.copernicus.eu/how-to-api>. The download does not provide
-`sigv`; that still requires sonic-anemometer data or an explicit approximation.
-
-## Merging local Frost observations with ERA5
-
-`merge_footprint_weather.py` creates the wide hourly weather CSV used by the
-UMEP generator. It:
-
-- uses local 10 m wind speed/direction and surface pressure from `SN76914`;
-- chooses the best-quality local 2 m temperature from the three nearby stations;
-- uses local dew point from `SN17850`, with `SN17853` as fallback;
-- uses ERA5 `u10/v10` only for missing or calm local wind;
-- retains ERA5 boundary-layer height;
-- derives `ustar` and Obukhov length from ERA5 stresses and turbulent fluxes
-  using ECMWF's documented equations.
-
-The command is strict by default and waits until all 12 monthly ERA5 files are
-present:
-
-```powershell
-python .\merge_footprint_weather.py --year 2025
-```
-
-For inspection while downloads are still in progress:
-
-```powershell
-python .\merge_footprint_weather.py --year 2025 --allow-partial
-```
-
-The default output is:
-
-```text
-local_weatherdata\merged_footprint_weather_2025.csv
-```
-
-The output includes source/provenance columns and `sdfor`. ECMWF recommends
-caution when deriving Obukhov length where the standard deviation of filtered
-subgrid orography (`sdfor`) is 50 m or greater. The ERA5 grid cell used here is
-approximately 53 m, so the merger labels those rows `sdfor_ge_50m` rather than
-hiding that limitation.
-
-After all months are downloaded and merged, generate the UMEP input with:
-
-```powershell
-python .\generate_umep_footprint_input.py `
-  --morphology .\morphometric_data\200m_IMPPoint_anisotropic.txt `
-  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_example_2025.csv `
-  --weather .\local_weatherdata\merged_footprint_weather_2025.csv `
-  --output .\output\umep_source_area_crop_2025.txt `
-  --measurement-height 2 `
-  --model kljun `
-  --sigma-v-ustar-ratio 2.0 `
-  --start 2025-01-01 `
-  --end 2026-01-01 `
-  --invalid-row-policy skip
-```
-
-Here `ustar`, Obukhov length, boundary-layer height, and wind direction vary
-hourly. `--sigma-v-ustar-ratio 2.0` remains an explicit approximation because
-hourly Frost/ERA5 data do not contain the high-frequency lateral-wind variance
-measured by a sonic anemometer.
-
-For wind-dependent sensitivity assumptions, `--ustar-fraction 0.10` can
-replace `--friction-velocity`, and `--sigma-v-ustar-ratio 2.0` can replace
-`--sigma-v`. Kljun rejects records where the resulting `ustar <= 0.1 m/s`.
-
-For the Kormann–Meixner option use `--model kormann`; `h` remains a required
-output column even though that model does not use it.
-
-## Tests
-
-```powershell
-python -m unittest discover -s tests -v
-```
-## Run the footprint model without QGIS
-
-`run_footprint_standalone.py` runs the Kljun et al. (2015) parameterisation
-directly from a generated 13-column UMEP input file. It writes two GeoTIFFs:
-footprint density and cumulative contribution percentage. Cells with values
-from `1` through `80` form the integrated 80% source area.
-
-Matching `.qml` files are written automatically. QGIS normally applies these
-same-basename styles when the GeoTIFFs are added: the percentage raster uses
-UMEP's red-to-blue footprint ramp and transparency, while the density raster
-uses a transparent heatmap based on its calculated maximum.
-
-Footprints are calculated in parallel using up to four workers by default.
-Use `--workers 1` for deterministic sequential benchmarking, or increase the
-value cautiously on machines with ample memory.
-The terminal reports elapsed seconds and minutes for each footprint run,
-each tower, and the complete multi-tower batch.
-
-For rapid tower-location screening, `--resolution 10` uses one quarter as many
-grid cells as the 5 m final product. A practical workflow is to compare all
-candidate locations at 10 m, then rerun only the shortlist at 5 m.
-
-On Windows, QGIS locks loaded GeoTIFFs. If an existing output cannot be
-replaced, the runner preserves it and automatically writes a matched new pair
-such as `footprint_run2_density.tif` and `footprint_run2_percent.tif`.
-
-For tower siting, add `--placement-analysis`. The hourly footprints are still
-calculated only once, but are accumulated into annual, growing/dormant,
-stable/neutral/unstable, and eight wind-sector climatologies. A
-`footprint_placement_summary.csv` compares valid hours, captured mass, and 80%
-source-area size. The growing season defaults to April–October and can be
-changed with `--growing-months`, for example `--growing-months 5-9`.
-For multi-tower batch runs, these summaries are also collected into
-`placement_comparison.csv` in the batch output directory.
-
-The QGIS percentage style is visually clipped to the 80% cumulative source
-area by default, while the GeoTIFF retains all values. Change the display
-boundary with `--display-percent 90` (or another value from 1 to 100).
-
-The tower coordinates must use the same projected CRS supplied with `--crs`.
-For the current QGIS project (EPSG:25832), a test run using the coordinates
-shown in the project is:
-
-```powershell
-python .\run_footprint_standalone.py `
-  --input .\output\umep_source_area_crop_2025_Jan-Jun.txt `
-  --tower-x 599753 `
-  --tower-y 6615344 `
-  --crs EPSG:25832 `
-  --fetch 2000 `
-  --resolution 5 `
-  --output-prefix .\output\crop_2025_Jan-Jun
-```
-
-For a quick ten-hour check, append `--limit 10`. Progress is printed every 50
-rows by default; use `--log-every 10` for more frequent messages and `--debug`
-for verbose logging. Invalid meteorological rows are skipped and recorded in
-`*_qc.csv`; use `--invalid-row-policy error` to stop on the first invalid row.
-
-The standalone calculation uses the time-varying crop/morphometric `z0` and
-`zd` already present in the input file. UMEP's footprint-weighted Kanda values
-are diagnostic outputs and are not fed back into the same timestep's
-footprint, so this runner likewise does not iterate each footprint.
-
-## Batch workflow from DOM/DTM and tower points
-
-`calculate_morphometry.py` reproduces UMEP's point morphometric calculation:
-it subtracts the DTM from the DOM, removes objects below 2 m, rotates the
-object-height raster for each direction, and applies UMEP's Kanda method 1.
-The default search radius is 200 m.
+## Morphometry only
 
 ```powershell
 python .\calculate_morphometry.py `
   --dom .\maps\dom_soraas_extended.tif `
   --dtm .\maps\dtm_soraas_extended.tif `
-  --towers .\maps\Flux_Tower.shp `
-  --output-dir .\output\towers
+  --towers .\maps\flux_towers.shp `
+  --radius 200 `
+  --angle-step 5 `
+  --output-dir .\output\morphometry
 ```
 
-The complete multi-tower workflow also generates the meteorological input and
-runs the footprint climatology:
+The calculation subtracts DTM from DOM, sets objects below 2 m to zero,
+rotates the object-height raster for each direction, samples UMEP's upwind
+centre ray, and applies Kanda method 1.
+
+## Generate UMEP input only
 
 ```powershell
-python .\run_tower_batch.py `
-  --dom .\maps\dom_soraas_extended.tif `
-  --dtm .\maps\dtm_soraas_extended.tif `
-  --towers .\maps\Flux_Tower.shp `
+python .\generate_umep_footprint_input.py `
+  --morphology .\output\morphometry\1\morphology.txt `
   --weather .\local_weatherdata\merged_footprint_weather_2025.csv `
+  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_example_2025.csv `
   --measurement-height 2 `
   --sigma-v-ustar-ratio 2.0 `
-  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_example_2025.csv `
-  --output-dir .\output\towers
+  --invalid-row-policy skip `
+  --start 2025-01-01 `
+  --end 2026-01-01 `
+  --output .\output\umep_input.txt
 ```
 
-Tower CSV columns are `id,x,y`, with optional `measurement_height_m`.
-Point shapefiles are also accepted. A shapefile with a `.prj` is transformed
-to the DOM/DTM coordinate system automatically; CSV coordinates are assumed
-to already use the raster CRS. Each tower gets its own morphology, UMEP input,
-footprint GeoTIFFs, and QC CSV.
+The generator also supports fixed sensitivity fallbacks for `ustar`, `sigv`,
+Obukhov length, and boundary-layer height. Run `--help` for all options.
+
+## Run an existing UMEP input file
+
+```powershell
+python .\run_footprint_standalone.py `
+  --input .\output\umep_input.txt `
+  --tower-x 599753 `
+  --tower-y 6615344 `
+  --crs EPSG:25832 `
+  --fetch 2000 `
+  --resolution 5 `
+  --workers 10 `
+  --display-percent 80 `
+  --output-prefix .\output\standalone\footprint
+```
+
+Append `--limit 10` for a short smoke test.
+
+## ERA5 download and weather merge
+
+`download_era5_footprint_data.py` downloads monthly ERA5 files containing the
+fields needed for friction velocity, Obukhov length, and boundary-layer
+height. It uses the standard CDS credentials file:
+
+```text
+C:\Users\<user>\.cdsapirc
+```
+
+Inspect requests without downloading:
+
+```powershell
+python .\download_era5_footprint_data.py --year 2025 --dry-run
+```
+
+Download or resume all twelve months:
+
+```powershell
+python .\download_era5_footprint_data.py --year 2025
+```
+
+Existing files are skipped unless `--overwrite` is used. A single month can
+be requested with `--month 1`.
+
+Merge ERA5 with the configured local Frost observations:
+
+```powershell
+python .\merge_footprint_weather.py --year 2025
+```
+
+Use `--allow-partial` only for inspection before all monthly files exist.
+The merge:
+
+- prefers configured local Frost wind, temperature, dew point, and pressure;
+- uses ERA5 surface wind as the missing/calm-wind fallback;
+- retains ERA5 boundary-layer height;
+- derives `ustar` and Obukhov length from ERA5 stress and turbulent fluxes;
+- records provenance fields and flags `sdfor >= 50 m`.
+
+ERA5 and hourly Frost data do not provide high-frequency lateral wind
+variance. A sonic anemometer is preferred for `sigv`; otherwise the chosen
+`sigv/ustar` ratio remains a sensitivity assumption.
+
+## Model limitations
+
+This is an analytical footprint model over horizontally homogeneous flow.
+DOM and DTM data are reduced to directional scalar `z0` and `zd`. Therefore:
+
+- buildings and forest influence roughness and record validity;
+- individual building wakes, recirculation, forest-edge turbulence, terrain
+  flow deflection, and porous-canopy flow are not explicitly simulated;
+- trees above the 2 m threshold are effectively treated as roughness objects,
+  not as a resolved porous canopy;
+- generated annual maps include only valid hours;
+- footprint-weighted Kanda values in the UMEP plugin are diagnostic and are
+  not fed back iteratively into the same hourly footprint.
+
+Two sites with identical hourly `z0`, `zd`, and meteorology produce the same
+Kljun footprint even if their detailed building layouts differ. Explicit wake
+analysis requires a flow model such as URock, CFD, or LES plus an appropriate
+dispersion/back-trajectory treatment.

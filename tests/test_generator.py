@@ -123,6 +123,21 @@ class GeneratorTests(unittest.TestCase):
         )
         self.assertEqual(validate_rows([row], "kljun"), [])
 
+    def test_rejects_zero_obukhov_without_dividing_by_zero(self):
+        row = OutputRow(
+            datetime(2025, 1, 1),
+            z0=0.01,
+            zd=0.0,
+            measurement_height=2.0,
+            sigv=1.0,
+            obukhov=0.0,
+            ustar=0.5,
+            wind_direction=0.0,
+            boundary_layer_height=1000.0,
+            porosity=60.0,
+        )
+        self.assertIn("non-zero Obukhov", validate_rows([row], "kljun")[0])
+
 
 if __name__ == "__main__":
     unittest.main()

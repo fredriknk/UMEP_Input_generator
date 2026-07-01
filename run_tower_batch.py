@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import sys
 import time
@@ -30,7 +31,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--obukhov", type=float)
     result.add_argument("--boundary-layer-height", type=float)
     result.add_argument("--output-dir", type=Path, default=Path("output/towers"))
-    result.add_argument("--morphometry-radius", type=float, default=200.0)
+    result.add_argument(
+        "--morphometry-radius", "--morphometry-distance",
+        dest="morphometry_radius", type=float, default=200.0,
+        help="Radius in metres used for DOM/DTM morphometry around each tower (default: 200)",
+    )
     result.add_argument("--angle-step", type=float, default=5.0)
     result.add_argument("--fetch", type=float, default=2000.0)
     result.add_argument("--resolution", type=float, default=5.0)
@@ -56,6 +61,21 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     batch_started = time.perf_counter()
     args = parser().parse_args(argv)
+    if args.morphometry_radius <= 0:
+        print("error: morphometry-radius must be positive", file=sys.stderr)
+        return 2
+    if args.angle_step <= 0 or not math.isclose(360 / args.angle_step, round(360 / args.angle_step)):
+        print("error: angle-step must be positive and divide 360", file=sys.stderr)
+        return 2
+    if args.fetch <= 0 or args.resolution <= 0 or args.workers <= 0:
+        print("error: fetch, resolution, and workers must be positive", file=sys.stderr)
+        return 2
+    if not 1 <= args.display_percent <= 100:
+        print("error: display-percent must be between 1 and 100", file=sys.stderr)
+        return 2
+    if args.measurement_height is not None and args.measurement_height <= 0:
+        print("error: measurement-height must be positive", file=sys.stderr)
+        return 2
     try:
         towers = read_towers(args.towers)
     except (OSError, ValueError, RuntimeError) as exc:
@@ -66,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             print("error: provide --measurement-height or measurement_height_m for every tower", file=sys.stderr)
             return 2
+    safe_names = [safe_name(tower.name) for tower in towers]
+    if len(set(safe_names)) != len(safe_names):
+        print("error: tower IDs must be unique after filename sanitization", file=sys.stderr)
+        return 2
     import rasterio
     with rasterio.open(args.dom) as source:
         raster_crs = source.crs.to_string()
@@ -86,7 +110,11 @@ def main(argv: list[str] | None = None) -> int:
             generator_args = [
                 "--morphology", str(morphology_path), "--weather", str(args.weather),
                 "--output", str(input_path), "--measurement-height",
-                str(tower.measurement_height or args.measurement_height),
+                str(
+                    tower.measurement_height
+                    if tower.measurement_height is not None
+                    else args.measurement_height
+                ),
                 "--invalid-row-policy", args.invalid_row_policy,
             ]
             if args.crop_height_schedule:

@@ -47,6 +47,19 @@ class StandaloneFootprintTests(unittest.TestCase):
         row[9] = 0.1
         self.assertEqual(validate_row(row), "ustar_not_above_0.1")
 
+    def test_validation_rejects_roughness_sublayer(self):
+        row = sample_row()
+        row[4] = 0.2
+        self.assertEqual(validate_row(row), "sensor_below_roughness_sublayer")
+
+    def test_non_divisible_grid_is_symmetric(self):
+        grid = Grid(fetch=10.0, resolution=6.0)
+        x, y = grid.coordinates()
+        self.assertEqual(grid.size, 4)
+        self.assertEqual(grid.extent, 12.0)
+        self.assertAlmostEqual(float(x.min()), -9.0)
+        self.assertAlmostEqual(float(x.max()), 9.0)
+
     def test_writes_qgis_styles_for_both_rasters(self):
         with tempfile.TemporaryDirectory() as folder:
             density = Path(folder) / "footprint_density.tif"
