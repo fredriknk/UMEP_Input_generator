@@ -41,8 +41,8 @@ Run the test suite with:
 
 ```powershell
 python .\run_tower_batch.py `
-  --dom .\maps\dom_soraas_extended.tif `
-  --dtm .\maps\dtm_soraas_extended.tif `
+  --dom .\maps\dom_soraas_extended_2m.tif `
+  --dtm .\maps\dtm_soraas_extended_2m.tif `
   --towers .\maps\flux_towers.shp `
   --weather .\local_weatherdata\merged_footprint_weather_2025.csv `
   --measurement-height 2 `
@@ -220,10 +220,27 @@ is not currently calculated by this repository.
 
 ## Morphometry only
 
+The repository uses compressed 2 m derivatives of the full-resolution source
+rasters. Recreate them with:
+
 ```powershell
-python .\calculate_morphometry.py `
+python .\resample_maps.py `
   --dom .\maps\dom_soraas_extended.tif `
   --dtm .\maps\dtm_soraas_extended.tif `
+  --output-dom .\maps\dom_soraas_extended_2m.tif `
+  --output-dtm .\maps\dtm_soraas_extended_2m.tif `
+  --resolution 2 `
+  --method bilinear
+```
+
+The original rasters are ignored by Git. Bilinear resampling is appropriate
+for continuous elevation surfaces; the resulting loss of narrow object detail
+should be considered when interpreting directional morphometry.
+
+```powershell
+python .\calculate_morphometry.py `
+  --dom .\maps\dom_soraas_extended_2m.tif `
+  --dtm .\maps\dtm_soraas_extended_2m.tif `
   --towers .\maps\flux_towers.shp `
   --radius 200 `
   --angle-step 5 `

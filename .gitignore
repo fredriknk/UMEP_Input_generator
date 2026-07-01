@@ -21,6 +21,10 @@ era_5_weatherdata/*.grib2
 era_5_weatherdata/*.zip
 local_weatherdata/merged_footprint_weather_*.csv
 
+# Full-resolution source rasters (commit the compressed *_2m.tif derivatives)
+maps/dom_soraas_extended.tif
+maps/dtm_soraas_extended.tif
+
 # Editor and operating-system files
 .vscode/
 .idea/
