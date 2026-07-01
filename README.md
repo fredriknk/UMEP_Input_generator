@@ -1,6 +1,6 @@
 # Standalone UMEP footprint workflow
 
-This project runs the UMEP Source Area workflow without QGIS. It can:
+This project runs the UMEP Source Area workflow. It can:
 
 1. calculate directional morphometry around one or more candidate towers from
    matching DOM and DTM rasters;
@@ -294,7 +294,7 @@ python .\download_era5_footprint_data.py --year 2025
 Existing files are skipped unless `--overwrite` is used. A single month can
 be requested with `--month 1`.
 
-Merge ERA5 with the configured local Frost observations:
+Merge ERA5 with the configured local Frost.met.no observations:
 
 ```powershell
 python .\merge_footprint_weather.py --year 2025
