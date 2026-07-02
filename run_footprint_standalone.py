@@ -624,8 +624,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("no valid footprints were calculated")
     climatology = totals["annual"] / valid_count
     percent, captured_mass = contribution_percent_raster(climatology, grid.resolution)
-    # A requested interpolated annual footprint replaces the coarse annual
-    # raster. Category rasters remain at the primary calculation resolution.
+    # Interpolated products replace their coarse counterparts so
+    # presentation-only workflows do not retain redundant rasters.
     if "footprint" in output_groups and args.interpolate_resolution is None and not args.contours:
         density_path, percent_path = write_geotiffs(
             args.output_prefix, climatology, percent, grid,
@@ -741,15 +741,60 @@ def run(args: argparse.Namespace) -> int:
             category_prefix = args.output_prefix.with_name(
                 args.output_prefix.name + "_" + label
             )
+            if args.interpolate_resolution is not None or args.contours:
+                target_resolution = (
+                    args.interpolate_resolution
+                    if args.interpolate_resolution is not None
+                    else grid.resolution / 2.0
+                )
+                output_density, output_grid = interpolate_footprint(
+                    category, grid, target_resolution, args.contour_smoothing
+                )
+                output_percent, _ = contribution_percent_raster(
+                    output_density, output_grid.resolution
+                )
+                output_prefix = category_prefix.with_name(
+                    category_prefix.name + "_interpolated"
+                )
+            else:
+                output_density = category
+                output_percent = category_percent
+                output_grid = grid
+                output_prefix = category_prefix
+
             category_density, category_percent_path = write_geotiffs(
-                category_prefix, category, category_percent, grid,
-                args.tower_x, args.tower_y, args.crs,
-                raster_types,
+                output_prefix, output_density, output_percent, output_grid,
+                args.tower_x, args.tower_y, args.crs, raster_types,
             )
-            write_qgis_styles(
-                category_density, category_percent_path, float(category.max()),
+            category_styles = write_qgis_styles(
+                category_density, category_percent_path, float(output_density.max()),
                 args.display_percent,
             )
+            for path in (
+                category_density,
+                category_percent_path,
+                *category_styles,
+            ):
+                if path:
+                    log.info("Wrote %s", path)
+
+            if args.contours:
+                category_contour_path = category_prefix.with_name(
+                    category_prefix.name + "_contours.shp"
+                )
+                shape_path, contour_qml = write_contours(
+                    category_contour_path,
+                    output_percent,
+                    output_grid,
+                    args.tower_x,
+                    args.tower_y,
+                    args.crs,
+                    args.contour_levels,
+                )
+                log.info(
+                    "Wrote %s contours %s and QGIS style %s",
+                    label, shape_path, contour_qml,
+                )
             area80 = (
                 int(np.count_nonzero(
                     (category_percent > 0) & (category_percent <= 80)
@@ -815,12 +860,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--interpolate-resolution",
         type=float,
-        help="Write a smoothed, finer annual footprint at this cell size in metres",
+        help="Write each requested footprint output at this finer cell size in metres",
     )
     parser.add_argument(
         "--contours",
         action="store_true",
-        help="Write styled annual cumulative-percentage contour lines",
+        help="Write styled cumulative-percentage contours for each requested output",
     )
     parser.add_argument(
         "--contour-levels",
@@ -874,10 +919,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.placement_analysis
         else requested_groups
     )
-    if (
-        args.interpolate_resolution is not None or args.contours
-    ) and "footprint" not in args.output_groups:
-        parser.error("--interpolate-resolution and --contours require the footprint output")
     try:
         args.contour_levels = tuple(
             sorted({int(value.strip()) for value in args.contour_levels.split(",")})

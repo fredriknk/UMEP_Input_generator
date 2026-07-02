@@ -109,14 +109,6 @@ def main(argv: list[str] | None = None) -> int:
         else requested_groups
     )
     category_outputs = bool(set(output_groups) - {"footprint"})
-    if (
-        args.interpolate_resolution is not None or args.contours
-    ) and "footprint" not in output_groups:
-        print(
-            "error: interpolate-resolution and contours require the footprint output",
-            file=sys.stderr,
-        )
-        return 2
     if args.measurement_height is not None and args.measurement_height <= 0:
         print("error: measurement-height must be positive", file=sys.stderr)
         return 2

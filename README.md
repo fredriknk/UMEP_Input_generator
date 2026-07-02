@@ -85,8 +85,8 @@ project. More workers increase memory use and may not improve throughput.
 | `--morphometry-radius 200` | Half-width of the DOM/DTM subset around each tower. A value of 200 produces an approximately 400 x 400 m analysis window. `--morphometry-distance` is an alias. |
 | `--fetch 2000` | Requested half-width of the footprint output domain. |
 | `--resolution 5` | Footprint raster cell size in metres. |
-| `--interpolate-resolution 2.5` | Replaces the coarse annual footprint raster with a smoothed raster at this finer cell size. |
-| `--contours` | Writes labelled cumulative-percentage contour lines with a QGIS style. |
+| `--interpolate-resolution 2.5` | Replaces every requested coarse raster with a smoothed raster at this finer cell size. |
+| `--contours` | Writes labelled cumulative-percentage contour lines with a QGIS style for every requested output. |
 | `--outputs footprint,season,stability` | Selects annual, seasonal, stability, and/or wind-sector output groups. |
 | `--raster-types density,percent` | Selects density rasters, cumulative-percent rasters, or both. |
 | `--display-percent 80` | Cumulative percentage shown by the generated QGIS style. It does not discard values from the raster. |
@@ -125,8 +125,8 @@ Each tower receives its own directory containing:
 - `footprint_density.tif` - mean footprint density in m-2, when requested;
 - `footprint_percent.tif` - cumulative contribution rank from 1 to 100, when requested;
 - matching `.qml` files for automatic QGIS rendering;
-- optional `footprint_interpolated_*.tif` rasters and a styled
-  `footprint_contours.shp` layer;
+- optional interpolated rasters and styled contour layers for every requested
+  output;
 - `footprint_qc.csv` - skipped timestamps and rejection reasons;
 - selected category rasters and `footprint_placement_summary.csv`.
 
@@ -149,8 +149,8 @@ Add the following to the batch or standalone command:
 --contour-smoothing 1.0
 ```
 
-This writes the selected finer annual raster type(s) instead of the coarse
-annual raster and writes cumulative-footprint contours as a shapefile. The
+This writes the selected finer raster type(s) instead of each corresponding
+coarse raster and writes cumulative-footprint contours as shapefiles. The
 matching QML renders thin dark lines with one buffered percentage label placed
 directly on each contour, so QGIS can load the layer without manual style
 copying.
@@ -158,9 +158,10 @@ Smoothing is expressed in original raster cells. If `--contours` is supplied
 without `--interpolate-resolution`, half the original cell size is used.
 
 Interpolation improves presentation and contour geometry; it does not add
-meteorological or spatial information. Contours are currently generated only
-for the annual footprint, even when placement-analysis category rasters are
-enabled.
+meteorological or spatial information. Interpolation and contours are applied
+to every requested output group and category. For example, requesting
+`footprint,season,stability` creates interpolated annual, growing/dormant, and
+unstable/neutral/stable products and contours.
 
 ## What the 13 UMEP columns contain
 

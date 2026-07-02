@@ -17,6 +17,7 @@ from run_footprint_standalone import (
     _placement_labels,
     parse_months,
     parse_choices,
+    parse_args,
 )
 
 
@@ -145,6 +146,17 @@ class StandaloneFootprintTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "invalid"):
             parse_choices("density,png", {"density", "percent"}, "raster-types")
+
+    def test_category_only_outputs_allow_contours(self):
+        args = parse_args([
+            "--input", "input.txt",
+            "--tower-x", "1",
+            "--tower-y", "2",
+            "--outputs", "stability",
+            "--contours",
+        ])
+        self.assertEqual(args.output_groups, ("stability",))
+        self.assertTrue(args.contours)
 
 
 if __name__ == "__main__":
