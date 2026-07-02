@@ -61,6 +61,8 @@ python .\run_tower_batch.py `
   --morphometry-radius 200 `
   --fetch 2000 `
   --resolution 5 `
+  --interpolate-resolution 2.5 `
+  --contours `
   --workers 10 `
   --display-percent 80 `
   --placement-analysis `
@@ -82,6 +84,8 @@ project. More workers increase memory use and may not improve throughput.
 | `--morphometry-radius 200` | Half-width of the DOM/DTM subset around each tower. A value of 200 produces an approximately 400 x 400 m analysis window. `--morphometry-distance` is an alias. |
 | `--fetch 2000` | Requested half-width of the footprint output domain. |
 | `--resolution 5` | Footprint raster cell size in metres. |
+| `--interpolate-resolution 2.5` | Writes an additional smoothed annual footprint at this finer cell size. |
+| `--contours` | Writes labelled cumulative-percentage contour lines with a QGIS style. |
 | `--display-percent 80` | Cumulative percentage shown by the generated QGIS style. It does not discard values from the raster. |
 | `--angle-step 5` | Direction interval used for morphometry; it must divide 360. |
 
@@ -118,6 +122,8 @@ Each tower receives its own directory containing:
 - `footprint_density.tif` - mean footprint density in m-2;
 - `footprint_percent.tif` - cumulative contribution rank from 1 to 100;
 - matching `.qml` files for automatic QGIS rendering;
+- optional `footprint_interpolated_*.tif` rasters and a styled
+  `footprint_contours.shp` layer;
 - `footprint_qc.csv` - skipped timestamps and rejection reasons;
 - category rasters and `footprint_placement_summary.csv` when
   `--placement-analysis` is enabled.
@@ -129,6 +135,29 @@ batch.
 QGIS often locks loaded GeoTIFFs on Windows. If an existing raster cannot be
 replaced, the runner writes a matched pair such as
 `footprint_run2_density.tif` and `footprint_run2_percent.tif`.
+
+### Interpolated rasters and contours
+
+Add the following to the batch or standalone command:
+
+```powershell
+--interpolate-resolution 2.5 `
+--contours `
+--contour-levels 10,20,30,40,50,60,70,80 `
+--contour-smoothing 1.0
+```
+
+This writes a finer annual density/percentage raster and cumulative-footprint
+contours as a shapefile. The matching QML renders thin dark lines with one
+buffered numeric label placed directly on each contour, so QGIS can load the
+layer without manual style copying.
+Smoothing is expressed in original raster cells. If `--contours` is supplied
+without `--interpolate-resolution`, half the original cell size is used.
+
+Interpolation improves presentation and contour geometry; it does not add
+meteorological or spatial information. Contours are currently generated only
+for the annual footprint, even when placement-analysis category rasters are
+enabled.
 
 ## What the 13 UMEP columns contain
 
@@ -170,6 +199,24 @@ value outside the schedule. In zero-object sectors:
 zd = (2/3) * crop height
 z0 = max(0.01 m, 0.123 * crop height)
 ```
+
+For a schedule that repeats every year, omit the year and use:
+
+```csv
+month,day,height_m
+1,1,0.00
+4,20,0.00
+5,20,0.15
+6,20,0.60
+7,5,0.80
+9,5,0.05
+12,31,0.00
+```
+
+The recurring schedule is mapped onto each weather year independently. It
+uses the same linear interpolation and endpoint-holding behaviour as the
+dated format. A recurring 29 February point maps to 28 February in non-leap
+years.
 
 Change these assumptions with `--crop-zd-factor`, `--crop-z0-factor`, and
 `--minimum-z0` when running the lower-level generator. The included spring
@@ -291,6 +338,8 @@ python .\run_footprint_standalone.py `
   --resolution 5 `
   --workers 10 `
   --display-percent 80 `
+  --interpolate-resolution 2.5 `
+  --contours `
   --output-prefix .\output\standalone\footprint
 ```
 
@@ -319,12 +368,14 @@ python .\download_era5_footprint_data.py --year 2025
 ```
 
 Existing files are skipped unless `--overwrite` is used. A single month can
-be requested with `--month 1`.
+be requested with `--month 1`; its default filename includes the month, for
+example `era5_footprint_parameters_2024_01.nc`. When `--output` is supplied
+for a single month, that exact path is used.
 
 Merge ERA5 with the configured local Frost.met.no observations:
 
 ```powershell
-python .\merge_footprint_weather.py --year 2025
+python .\merge_footprint_weather.py --frost .\local_weatherdata\filename.csv --year 2025
 ```
 
 Use `--allow-partial` only for inspection before all monthly files exist.
@@ -335,6 +386,11 @@ The merge:
 - retains ERA5 boundary-layer height;
 - derives `ustar` and Obukhov length from ERA5 stress and turbulent fluxes;
 - records provenance fields and flags `sdfor >= 50 m`.
+
+Current ERA5 downloads include `u10/v10` as a fallback for missing or calm
+local wind. Hours lacking both Frost and ERA5 wind are skipped with a warning;
+use `--missing-wind-policy error` to abort instead. The default output filename
+uses the requested year, while `--output` is used exactly as supplied.
 
 ERA5 and hourly Frost data do not provide high-frequency lateral wind
 variance. A sonic anemometer is preferred for `sigv`; otherwise the chosen

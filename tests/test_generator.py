@@ -8,6 +8,7 @@ from generate_umep_footprint_input import (
     CropHeightPoint,
     Morphology,
     OutputRow,
+    RecurringCropHeightPoint,
     interpolate_crop_height,
     interpolate_morphology,
     interpolate_morphology_with_crop,
@@ -60,6 +61,26 @@ class GeneratorTests(unittest.TestCase):
                 CropHeightPoint(date(2025, 5, 1), 0.0),
                 CropHeightPoint(date(2025, 5, 11), 0.4),
             ],
+        )
+        self.assertAlmostEqual(
+            interpolate_crop_height(schedule, datetime(2025, 5, 6, 12)), 0.2
+        )
+
+    def test_reads_recurring_month_day_schedule_across_years(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "crop.csv"
+            path.write_text(
+                "month,day,height_m\n"
+                "1,1,0.0\n"
+                "5,1,0.0\n"
+                "5,11,0.4\n"
+                "12,31,0.0\n",
+                encoding="utf-8",
+            )
+            schedule = read_crop_height_schedule(path)
+        self.assertEqual(schedule[0], RecurringCropHeightPoint(1, 1, 0.0))
+        self.assertAlmostEqual(
+            interpolate_crop_height(schedule, datetime(2024, 5, 6, 12)), 0.2
         )
         self.assertAlmostEqual(
             interpolate_crop_height(schedule, datetime(2025, 5, 6, 12)), 0.2

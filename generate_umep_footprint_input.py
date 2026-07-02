@@ -38,6 +38,13 @@ class CropHeightPoint:
 
 
 @dataclass(frozen=True)
+class RecurringCropHeightPoint:
+    month: int
+    day: int
+    height: float
+
+
+@dataclass(frozen=True)
 class OutputRow:
     timestamp: datetime
     z0: float
@@ -111,25 +118,44 @@ def read_morphology(path: Path) -> list[Morphology]:
     return sorted(result, key=lambda item: item.direction)
 
 
-def read_crop_height_schedule(path: Path) -> list[CropHeightPoint]:
+def read_crop_height_schedule(
+    path: Path,
+) -> list[CropHeightPoint] | list[RecurringCropHeightPoint]:
     with path.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
             raise InputError(f"No crop-height schedule header found in {path}")
         fields = {name.strip().lower(): name for name in reader.fieldnames}
-        try:
-            date_field = fields["date"]
-            height_field = fields["height_m"]
-        except KeyError as exc:
+        height_field = fields.get("height_m")
+        date_field = fields.get("date")
+        month_field = fields.get("month")
+        day_field = fields.get("day")
+        if not height_field or not (
+            date_field or (month_field and day_field)
+        ):
             raise InputError(
-                "Crop-height schedule header must contain date,height_m"
-            ) from exc
+                "Crop-height schedule header must contain either date,height_m "
+                "or month,day,height_m"
+            )
+        if date_field and (month_field or day_field):
+            raise InputError(
+                "Crop-height schedule must use either date or month/day columns, not both"
+            )
 
-        result = []
+        result: list[CropHeightPoint] | list[RecurringCropHeightPoint] = []
         for line_number, row in enumerate(reader, start=2):
             try:
-                point_date = date.fromisoformat(row[date_field].strip())
                 height = _float(row[height_field], "crop height")
+                if date_field:
+                    point = CropHeightPoint(
+                        date.fromisoformat(row[date_field].strip()), height
+                    )
+                else:
+                    month = int(_float(row[month_field], "crop month"))
+                    day = int(_float(row[day_field], "crop day"))
+                    # Leap year 2000 validates every possible recurring date.
+                    date(2000, month, day)
+                    point = RecurringCropHeightPoint(month, day, height)
             except (AttributeError, ValueError) as exc:
                 raise InputError(
                     f"Invalid crop-height schedule row {line_number} in {path}"
@@ -138,22 +164,39 @@ def read_crop_height_schedule(path: Path) -> list[CropHeightPoint]:
                 raise InputError(
                     f"Crop height cannot be negative at row {line_number} in {path}"
                 )
-            result.append(CropHeightPoint(point_date, height))
+            result.append(point)
 
     if not result:
         raise InputError(f"No crop-height records found in {path}")
-    result.sort(key=lambda item: item.date)
-    if len({item.date for item in result}) != len(result):
-        raise InputError("Crop-height schedule dates must be unique")
+    if isinstance(result[0], CropHeightPoint):
+        result.sort(key=lambda item: item.date)
+        if len({item.date for item in result}) != len(result):
+            raise InputError("Crop-height schedule dates must be unique")
+    else:
+        result.sort(key=lambda item: (item.month, item.day))
+        if len({(item.month, item.day) for item in result}) != len(result):
+            raise InputError("Recurring crop-height month/day values must be unique")
     return result
 
 
 def interpolate_crop_height(
-    schedule: list[CropHeightPoint], timestamp: datetime
+    schedule: list[CropHeightPoint] | list[RecurringCropHeightPoint],
+    timestamp: datetime,
 ) -> float:
     """Linearly interpolate crop height; hold endpoint values outside the schedule."""
     if not schedule:
         raise InputError("No crop-height schedule values are available")
+    if isinstance(schedule[0], RecurringCropHeightPoint):
+        dated_schedule = []
+        for item in schedule:
+            try:
+                point_date = date(timestamp.year, item.month, item.day)
+            except ValueError:
+                # A recurring 29 February point maps to 28 February in
+                # non-leap years.
+                point_date = date(timestamp.year, 2, 28)
+            dated_schedule.append(CropHeightPoint(point_date, item.height))
+        schedule = dated_schedule
     target = timestamp.date()
     if target <= schedule[0].date:
         return schedule[0].height
@@ -307,7 +350,9 @@ def build_rows(
     weather: list[dict[str, str]],
     morphology: list[Morphology],
     args: argparse.Namespace,
-    crop_schedule: list[CropHeightPoint] | None = None,
+    crop_schedule: (
+        list[CropHeightPoint] | list[RecurringCropHeightPoint] | None
+    ) = None,
 ) -> list[OutputRow]:
     output = []
     for index, record in enumerate(weather, start=2):
@@ -447,8 +492,8 @@ def parser() -> argparse.ArgumentParser:
         "--crop-height-schedule",
         type=Path,
         help=(
-            "CSV with date,height_m rows. Zero-object morphology sectors receive "
-            "date-interpolated crop roughness."
+            "CSV with date,height_m or recurring month,day,height_m rows. "
+            "Zero-object morphology sectors receive interpolated crop roughness."
         ),
     )
     result.add_argument(

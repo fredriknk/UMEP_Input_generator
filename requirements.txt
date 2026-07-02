@@ -11,5 +11,8 @@ rasterio>=1.3,<2.0
 # UMEP-compatible nearest-neighbour rotations for directional morphometry
 scipy>=1.11,<2.0
 
+# Extracting cumulative-footprint contour lines
+contourpy>=1.2,<2.0
+
 # Flux-tower shapefile geometry and attributes
 pyshp>=2.3,<3.0

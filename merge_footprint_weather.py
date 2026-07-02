@@ -81,6 +81,8 @@ class Era5Row:
     ishf: float
     moisture_flux: float
     sdfor: float
+    u10: float | None = None
+    v10: float | None = None
 
 
 def parse_utc(text: str) -> datetime:
@@ -145,6 +147,12 @@ def _scalar(variable, index: int) -> float:
     return float(value)
 
 
+def _optional_scalar(dataset: Dataset, name: str, index: int) -> float | None:
+    if name not in dataset.variables:
+        return None
+    return _scalar(dataset[name], index)
+
+
 def read_era5(paths: Iterable[Path]) -> dict[datetime, Era5Row]:
     rows: dict[datetime, Era5Row] = {}
     for path in sorted(paths):
@@ -183,6 +191,8 @@ def read_era5(paths: Iterable[Path]) -> dict[datetime, Era5Row]:
                     ishf=_scalar(dataset["ishf"], index),
                     moisture_flux=_scalar(dataset["ie"], index),
                     sdfor=_scalar(dataset["sdfor"], index),
+                    u10=_optional_scalar(dataset, "u10", index),
+                    v10=_optional_scalar(dataset, "v10", index),
                 )
     if not rows:
         raise MergeError("No ERA5 records were read")
@@ -289,6 +299,11 @@ def merge_rows(
     for timestamp, era in sorted(era5.items()):
         observations = frost.get(timestamp, {})
         fallback_wind = surface_wind.get(timestamp)
+        if fallback_wind is None and era.u10 is not None and era.v10 is not None:
+            fallback_wind = (
+                math.hypot(era.u10, era.v10),
+                math.degrees(math.atan2(-era.u10, -era.v10)) % 360.0,
+            )
 
         speed_observation = observations.get("wind_speed")
         if speed_observation is not None:
@@ -386,27 +401,35 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--era5-surface-csv",
         type=Path,
-        default=Path(
-            "era_5_weatherdata/"
-            "59.66024225482937N10.78266480752292E-2025-sfc.csv"
+        help=(
+            "Optional legacy u10/v10 CSV used for missing/calm local wind. "
+            "New footprint NetCDF downloads contain u10/v10 directly."
         ),
-        help="Optional u10/v10 CSV used only for missing/calm local wind",
     )
     result.add_argument(
         "--output",
         type=Path,
-        default=Path("local_weatherdata/merged_footprint_weather_2025.csv"),
+        help="Output CSV (default: local_weatherdata/merged_footprint_weather_YEAR.csv)",
     )
     result.add_argument(
         "--allow-partial",
         action="store_true",
         help="Allow output when fewer than all hours of the requested year are present",
     )
+    result.add_argument(
+        "--missing-wind-policy",
+        choices=("skip", "error"),
+        default="skip",
+        help="Skip hours lacking all wind sources, or abort (default: skip)",
+    )
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    output_path = args.output or Path(
+        f"local_weatherdata/merged_footprint_weather_{args.year}.csv"
+    )
     pattern = f"era5_footprint_parameters_{args.year}_??.nc"
     paths = sorted(args.era5_directory.glob(pattern))
     if not paths:
@@ -427,14 +450,20 @@ def main(argv: list[str] | None = None) -> int:
         wanted_times = set(era5)
         frost = read_frost(args.frost, wanted_times)
         surface_wind_path = (
-            args.era5_surface_csv if args.era5_surface_csv.is_file() else None
+            args.era5_surface_csv
+            if args.era5_surface_csv and args.era5_surface_csv.is_file()
+            else None
         )
         surface_wind = read_surface_wind_csv(surface_wind_path, wanted_times)
         rows = merge_rows(era5, frost, surface_wind)
         missing_wind = sum(not row["wdir"] or not row["wind_speed"] for row in rows)
-        if missing_wind:
+        if missing_wind and args.missing_wind_policy == "error":
             raise MergeError(f"{missing_wind} output rows have no usable wind")
-        write_csv(args.output, rows)
+        if missing_wind:
+            rows = [row for row in rows if row["wdir"] and row["wind_speed"]]
+            if not rows:
+                raise MergeError("all output rows lack usable wind")
+        write_csv(output_path, rows)
     except (MergeError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -442,8 +471,13 @@ def main(argv: list[str] | None = None) -> int:
     flagged = sum(row["obukhov_qc"] != "ok" for row in rows)
     print(
         f"Wrote {len(rows)} merged hourly records from {len(paths)} ERA5 month(s) "
-        f"to {args.output}"
+        f"to {output_path}"
     )
+    if missing_wind:
+        print(
+            f"warning: skipped {missing_wind} hour(s) with no usable Frost or ERA5 wind",
+            file=sys.stderr,
+        )
     if flagged:
         print(
             f"warning: {flagged} records have sdfor >= 50 m; ECMWF advises caution "

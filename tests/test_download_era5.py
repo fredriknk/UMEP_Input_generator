@@ -27,14 +27,16 @@ class Era5DownloadTests(unittest.TestCase):
             "instantaneous_eastward_turbulent_surface_stress",
             request["variable"],
         )
+        self.assertIn("10m_u_component_of_wind", request["variable"])
+        self.assertIn("10m_v_component_of_wind", request["variable"])
 
-    def test_adds_month_suffix_for_full_year_download(self):
+    def test_monthly_output_suffix(self):
         base = Path("era5_footprint_parameters_2025.nc")
         self.assertEqual(
-            monthly_output_path(base, 7, False),
+            monthly_output_path(base, 7, True),
             Path("era5_footprint_parameters_2025_07.nc"),
         )
-        self.assertEqual(monthly_output_path(base, 7, True), base)
+        self.assertEqual(monthly_output_path(base, 7, False), base)
 
 
 if __name__ == "__main__":

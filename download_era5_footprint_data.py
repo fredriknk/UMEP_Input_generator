@@ -14,6 +14,8 @@ from pathlib import Path
 DATASET = "reanalysis-era5-single-levels"
 VARIABLES = [
     "boundary_layer_height",
+    "10m_u_component_of_wind",
+    "10m_v_component_of_wind",
     "surface_pressure",
     "2m_temperature",
     "2m_dewpoint_temperature",
@@ -57,8 +59,11 @@ def build_request(
     }
 
 
-def monthly_output_path(base: Path, month: int, single_month: bool) -> Path:
-    if single_month:
+def monthly_output_path(
+    base: Path, month: int, include_month_suffix: bool
+) -> Path:
+    """Return an output path, optionally inserting a two-digit month."""
+    if not include_month_suffix:
         return base
     return base.with_name(f"{base.stem}_{month:02d}{base.suffix}")
 
@@ -82,8 +87,8 @@ def parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         help=(
-            "Output NetCDF path (default: "
-            "era_5_weatherdata/era5_footprint_parameters_YEAR.nc)"
+            "Output NetCDF path. An explicit path is used exactly for a single "
+            "month; default files include _MM."
         ),
     )
     result.add_argument(
@@ -118,11 +123,14 @@ def main(argv: list[str] | None = None) -> int:
         f"era_5_weatherdata/era5_footprint_parameters_{args.year}.nc"
     )
     months = [args.month] if args.month is not None else list(range(1, 13))
+    # Full-year runs always need distinct monthly paths. Single-month runs use
+    # the month suffix by default, but an explicit --output remains exact.
+    include_month_suffix = args.month is None or args.output is None
     requests = [
         (
             month,
             build_request(args.year, month, args.latitude, args.longitude),
-            monthly_output_path(base_output, month, args.month is not None),
+            monthly_output_path(base_output, month, include_month_suffix),
         )
         for month in months
     ]

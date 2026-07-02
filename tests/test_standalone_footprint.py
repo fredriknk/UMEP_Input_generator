@@ -9,7 +9,9 @@ from run_footprint_standalone import (
     Grid,
     contribution_percent_raster,
     footprint_for_row,
+    interpolate_footprint,
     validate_row,
+    write_contours,
     write_qgis_styles,
     _select_output_paths,
     _placement_labels,
@@ -59,6 +61,40 @@ class StandaloneFootprintTests(unittest.TestCase):
         self.assertEqual(grid.extent, 12.0)
         self.assertAlmostEqual(float(x.min()), -9.0)
         self.assertAlmostEqual(float(x.max()), 9.0)
+
+    def test_interpolation_is_finer_and_preserves_mass(self):
+        grid = Grid(fetch=10.0, resolution=5.0)
+        source = np.zeros((grid.size, grid.size))
+        source[1:3, 1:3] = 1.0
+        interpolated, fine_grid = interpolate_footprint(source, grid, 2.0, 0.5)
+        self.assertEqual(interpolated.shape, (10, 10))
+        self.assertEqual(fine_grid.resolution, 2.0)
+        self.assertAlmostEqual(
+            float(source.sum()) * grid.resolution**2,
+            float(interpolated.sum()) * fine_grid.resolution**2,
+        )
+
+    def test_writes_labelled_contour_shapefile_and_qml(self):
+        grid = Grid(fetch=10.0, resolution=1.0)
+        x, y = grid.coordinates()
+        percent = np.clip(np.ceil(np.hypot(x, y) * 10), 1, 100).astype(np.uint8)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "footprint_contours.shp"
+            shape_path, qml_path = write_contours(
+                path, percent, grid, 100.0, 200.0, "EPSG:25832", (20, 40, 60)
+            )
+            import shapefile
+
+            reader = shapefile.Reader(str(shape_path))
+            levels = {record[0] for record in reader.records()}
+            reader.close()
+            self.assertEqual(levels, {20, 40, 60})
+            qml = qml_path.read_text(encoding="utf-8")
+            self.assertIn('fieldName="level"', qml)
+            self.assertIn("<text-buffer ", qml)
+            self.assertIn('<placement placement="3"', qml)
+            self.assertIn('placementFlags="9"', qml)
+            self.assertIn('repeatDistance="0"', qml)
 
     def test_writes_qgis_styles_for_both_rasters(self):
         with tempfile.TemporaryDirectory() as folder:

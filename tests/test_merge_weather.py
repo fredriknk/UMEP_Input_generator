@@ -71,6 +71,13 @@ class MergeWeatherTests(unittest.TestCase):
             rows[0]["wind_direction_source"], "era5:u10_v10:local_calm"
         )
 
+    def test_netCDF_wind_is_used_when_frost_wind_is_missing(self):
+        era_with_wind = Era5Row(**{**self.era.__dict__, "u10": -2.0, "v10": 0.0})
+        rows = merge_rows({self.timestamp: era_with_wind}, {}, {})
+        self.assertEqual(rows[0]["wdir"], "90.0000")
+        self.assertEqual(rows[0]["wind_speed"], "2.0000")
+        self.assertEqual(rows[0]["wind_direction_source"], "era5:u10_v10")
+
 
 if __name__ == "__main__":
     unittest.main()

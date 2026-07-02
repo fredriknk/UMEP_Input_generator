@@ -36,7 +36,9 @@ class Grid:
 
     @property
     def size(self) -> int:
-        return int(math.ceil(2 * self.fetch / self.resolution))
+        cells = 2 * self.fetch / self.resolution
+        nearest = round(cells)
+        return int(nearest if math.isclose(cells, nearest, rel_tol=1e-12) else math.ceil(cells))
 
     @property
     def extent(self) -> float:
@@ -170,6 +172,125 @@ def contribution_percent_raster(
     ranks.ravel()[order] = values
     ranks.ravel()[flat == 0] = 0
     return ranks, total
+
+
+def interpolate_footprint(
+    footprint: np.ndarray,
+    grid: Grid,
+    target_resolution: float,
+    smoothing_sigma: float = 1.0,
+) -> tuple[np.ndarray, Grid]:
+    """Return a finer, smooth density grid while preserving captured mass."""
+    from scipy.ndimage import gaussian_filter, zoom
+
+    if target_resolution <= 0 or target_resolution >= grid.resolution:
+        raise ValueError("interpolate-resolution must be positive and finer than resolution")
+    if smoothing_sigma < 0:
+        raise ValueError("contour-smoothing must be non-negative")
+
+    source = np.maximum(footprint, 0)
+    if smoothing_sigma:
+        source = gaussian_filter(source, smoothing_sigma, mode="constant")
+    target_size = int(math.ceil(2 * grid.extent / target_resolution))
+    actual_resolution = 2 * grid.extent / target_size
+    interpolated = zoom(
+        source,
+        (target_size / source.shape[0], target_size / source.shape[1]),
+        order=3,
+        mode="nearest",
+        prefilter=True,
+    )
+    interpolated = np.maximum(interpolated, 0)
+    source_mass = float(footprint.sum()) * grid.resolution**2
+    target_mass = float(interpolated.sum()) * actual_resolution**2
+    if target_mass > 0:
+        interpolated *= source_mass / target_mass
+    return interpolated, Grid(grid.extent, actual_resolution)
+
+
+def write_contours(
+    path: Path,
+    percent: np.ndarray,
+    grid: Grid,
+    tower_x: float,
+    tower_y: float,
+    crs: str,
+    levels: tuple[int, ...],
+) -> tuple[Path, Path]:
+    """Write cumulative-percentage contour lines and an automatic QGIS style."""
+    try:
+        import contourpy
+        import shapefile
+        from rasterio.crs import CRS
+    except ImportError as exc:
+        raise RuntimeError("contourpy, pyshp, and rasterio are required for contours") from exc
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    axis = -grid.extent + (np.arange(grid.size) + 0.5) * grid.resolution
+    surface = np.ma.masked_where(percent <= 0, percent.astype(np.float64))
+    generator = contourpy.contour_generator(
+        x=axis + tower_x,
+        y=axis + tower_y,
+        z=surface,
+        name="serial",
+        line_type="Separate",
+        corner_mask=True,
+    )
+    with shapefile.Writer(str(path), shapeType=shapefile.POLYLINE) as writer:
+        writer.field("level", "N", size=3, decimal=0)
+        writer.field("label", "C", size=8)
+        for level in levels:
+            for line in generator.lines(float(level)):
+                if len(line) < 2:
+                    continue
+                writer.line([[tuple(point) for point in line]])
+                writer.record(level, f"{level}%")
+    path.with_suffix(".prj").write_text(
+        CRS.from_user_input(crs).to_wkt(), encoding="utf-8"
+    )
+    path.with_suffix(".cpg").write_text("UTF-8", encoding="ascii")
+    qml_path = path.with_suffix(".qml")
+    qml_path.write_text(
+        """<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.34" styleCategories="Symbology|Labeling" labelsEnabled="1">
+  <renderer-v2 type="singleSymbol" enableorderby="0" forceraster="0">
+    <symbols>
+      <symbol type="line" name="0" alpha="1" clip_to_extent="1">
+        <layer class="SimpleLine" enabled="1">
+          <Option type="Map">
+            <Option name="line_color" value="35,35,35,230" type="QString"/>
+            <Option name="line_style" value="solid" type="QString"/>
+            <Option name="line_width" value="0.3" type="QString"/>
+            <Option name="line_width_unit" value="MM" type="QString"/>
+          </Option>
+        </layer>
+      </symbol>
+    </symbols>
+  </renderer-v2>
+  <labeling type="simple">
+    <settings calloutType="simple">
+      <text-style fieldName="level" isExpression="0" fontFamily="Arial"
+                  fontSize="8" fontSizeUnit="Point" textColor="35,35,35,255"
+                  textOpacity="1" fontWeight="50" namedStyle="Regular">
+        <text-buffer bufferDraw="1" bufferSize="0.8" bufferSizeUnits="MM"
+                     bufferColor="255,255,255,220" bufferOpacity="1"
+                     bufferNoFill="0" bufferJoinStyle="128"/>
+      </text-style>
+      <text-format multilineHeight="1" formatNumbers="0" decimals="0"/>
+      <placement placement="3" placementFlags="9" layerType="LineGeometry"
+                 repeatDistance="0" repeatDistanceUnits="MapUnit"
+                 dist="0" distUnits="MM" preserveRotation="1"
+                 maxCurvedCharAngleIn="25" maxCurvedCharAngleOut="-25"/>
+      <rendering drawLabels="1" scaleVisibility="0" obstacle="0"
+                 labelPerPart="0" mergeLines="0" maxNumLabels="2000"/>
+    </settings>
+  </labeling>
+  <layerGeometryType>1</layerGeometryType>
+</qgis>
+""",
+        encoding="utf-8",
+    )
+    return path, qml_path
 
 
 def write_geotiffs(
@@ -499,6 +620,50 @@ def run(args: argparse.Namespace) -> int:
     if captured_mass < 0.8:
         log.warning("Less than 80% of the modelled mass is inside the selected fetch")
 
+    if args.interpolate_resolution is not None or args.contours:
+        target_resolution = (
+            args.interpolate_resolution
+            if args.interpolate_resolution is not None
+            else grid.resolution / 2.0
+        )
+        interpolated, interpolated_grid = interpolate_footprint(
+            climatology, grid, target_resolution, args.contour_smoothing
+        )
+        interpolated_percent, _ = contribution_percent_raster(
+            interpolated, interpolated_grid.resolution
+        )
+        interpolated_prefix = args.output_prefix.with_name(
+            args.output_prefix.name + "_interpolated"
+        )
+        interpolated_density_path, interpolated_percent_path = write_geotiffs(
+            interpolated_prefix, interpolated, interpolated_percent,
+            interpolated_grid, args.tower_x, args.tower_y, args.crs,
+        )
+        write_qgis_styles(
+            interpolated_density_path,
+            interpolated_percent_path,
+            float(interpolated.max()),
+            args.display_percent,
+        )
+        log.info(
+            "Wrote interpolated footprint at %.3f m resolution",
+            interpolated_grid.resolution,
+        )
+        if args.contours:
+            contour_path = args.output_prefix.with_name(
+                args.output_prefix.name + "_contours.shp"
+            )
+            shape_path, contour_qml = write_contours(
+                contour_path,
+                interpolated_percent,
+                interpolated_grid,
+                args.tower_x,
+                args.tower_y,
+                args.crs,
+                args.contour_levels,
+            )
+            log.info("Wrote contours %s and QGIS style %s", shape_path, contour_qml)
+
     if args.placement_analysis:
         summary_path = args.output_prefix.with_name(
             args.output_prefix.name + "_placement_summary.csv"
@@ -583,6 +748,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="QGIS style displays this cumulative footprint percentage (default: 80)",
     )
     parser.add_argument(
+        "--interpolate-resolution",
+        type=float,
+        help="Write a smoothed, finer annual footprint at this cell size in metres",
+    )
+    parser.add_argument(
+        "--contours",
+        action="store_true",
+        help="Write styled annual cumulative-percentage contour lines",
+    )
+    parser.add_argument(
+        "--contour-levels",
+        default="10,20,30,40,50,60,70,80",
+        help="Comma-separated cumulative percentage contours (default: 10,...,80)",
+    )
+    parser.add_argument(
+        "--contour-smoothing",
+        type=float,
+        default=1.0,
+        help="Gaussian smoothing sigma in original raster cells (default: 1)",
+    )
+    parser.add_argument(
         "--growing-months",
         default="4-10",
         help="Growing-season months, e.g. 4-10 or 4,5,6,7,8,9,10 (default: 4-10)",
@@ -600,6 +786,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--limit must be positive")
     if not 1 <= args.display_percent <= 100:
         parser.error("--display-percent must be between 1 and 100")
+    if args.interpolate_resolution is not None and (
+        args.interpolate_resolution <= 0
+        or args.interpolate_resolution >= args.resolution
+    ):
+        parser.error("--interpolate-resolution must be positive and finer than --resolution")
+    if args.contour_smoothing < 0:
+        parser.error("--contour-smoothing must be non-negative")
+    try:
+        args.contour_levels = tuple(
+            sorted({int(value.strip()) for value in args.contour_levels.split(",")})
+        )
+    except ValueError:
+        parser.error("--contour-levels must be comma-separated integers")
+    if not args.contour_levels or any(not 1 <= level <= 100 for level in args.contour_levels):
+        parser.error("--contour-levels must be between 1 and 100")
     try:
         args.growing_months = parse_months(args.growing_months)
     except ValueError as exc:

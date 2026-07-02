@@ -14,12 +14,6 @@ htmlcov/
 
 # Generated model output and large ERA5 downloads
 output/
-era_5_weatherdata/*.nc
-era_5_weatherdata/*.nc4
-era_5_weatherdata/*.grib
-era_5_weatherdata/*.grib2
-era_5_weatherdata/*.zip
-local_weatherdata/merged_footprint_weather_*.csv
 
 # Full-resolution source rasters (commit the compressed *_2m.tif derivatives)
 maps/dom_soraas_extended.tif

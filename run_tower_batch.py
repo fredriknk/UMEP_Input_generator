@@ -52,6 +52,10 @@ def parser() -> argparse.ArgumentParser:
         "--display-percent", type=int, default=80,
         help="Visible cumulative footprint percentage in QGIS styles",
     )
+    result.add_argument("--interpolate-resolution", type=float)
+    result.add_argument("--contours", action="store_true")
+    result.add_argument("--contour-levels", default="10,20,30,40,50,60,70,80")
+    result.add_argument("--contour-smoothing", type=float, default=1.0)
     result.add_argument("--start")
     result.add_argument("--end")
     result.add_argument("--invalid-row-policy", choices=("skip", "error"), default="skip")
@@ -72,6 +76,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not 1 <= args.display_percent <= 100:
         print("error: display-percent must be between 1 and 100", file=sys.stderr)
+        return 2
+    if args.interpolate_resolution is not None and (
+        args.interpolate_resolution <= 0
+        or args.interpolate_resolution >= args.resolution
+    ):
+        print(
+            "error: interpolate-resolution must be positive and finer than resolution",
+            file=sys.stderr,
+        )
+        return 2
+    if args.contour_smoothing < 0:
+        print("error: contour-smoothing must be non-negative", file=sys.stderr)
         return 2
     if args.measurement_height is not None and args.measurement_height <= 0:
         print("error: measurement-height must be positive", file=sys.stderr)
@@ -138,7 +154,15 @@ def main(argv: list[str] | None = None) -> int:
                 "--output-prefix", str(footprint_prefix), "--invalid-row-policy", args.invalid_row_policy,
                 "--workers", str(args.workers),
                 "--display-percent", str(args.display_percent),
+                "--contour-levels", args.contour_levels,
+                "--contour-smoothing", str(args.contour_smoothing),
             ]
+            if args.interpolate_resolution is not None:
+                footprint_args += [
+                    "--interpolate-resolution", str(args.interpolate_resolution)
+                ]
+            if args.contours:
+                footprint_args.append("--contours")
             if args.placement_analysis:
                 footprint_args += [
                     "--placement-analysis",

@@ -168,9 +168,13 @@ def calculate_for_tower(dom_path: Path, dtm_path: Path, tower: Tower, radius: fl
         tower = project_tower(tower, dom.crs.to_string())
         row, col = dom.index(tower.x, tower.y)
         pixel_width, pixel_height = abs(dom.transform.a), abs(dom.transform.e)
-        if not math.isclose(pixel_width, pixel_height, rel_tol=1e-6, abs_tol=1e-9):
+        # GeoTIFF transforms commonly contain tiny X/Y scale differences after
+        # reprojection or export. Treat cells within 0.1% as effectively square,
+        # while still rejecting genuinely rectangular grids that would bias the
+        # rotation-based morphometry.
+        if not math.isclose(pixel_width, pixel_height, rel_tol=1e-3, abs_tol=1e-6):
             raise ValueError("DOM/DTM pixels must be square for directional morphometry")
-        pixel_size = pixel_width
+        pixel_size = (pixel_width + pixel_height) / 2.0
         half = int(math.ceil(radius / pixel_size))
         window = Window(col - half, row - half, 2 * half, 2 * half)
         if window.col_off < 0 or window.row_off < 0 or window.col_off + window.width > dom.width or window.row_off + window.height > dom.height:
