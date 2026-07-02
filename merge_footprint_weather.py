@@ -209,41 +209,50 @@ def _observation_rank(element: str, observation: Observation) -> tuple[int, int]
 
 
 def read_frost(
-    path: Path, wanted_times: set[datetime]
+    paths: Path | Iterable[Path], wanted_times: set[datetime]
 ) -> dict[datetime, dict[str, Observation]]:
+    """Read one or more Frost CSV files into one quality-ranked observation set."""
     result: dict[datetime, dict[str, Observation]] = {}
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        for line_number, record in enumerate(csv.DictReader(handle), start=2):
-            element = record.get("element_id", "")
-            source = record.get("source_id", "")
-            if (
-                element not in FROST_SOURCE_PRIORITY
-                or source not in FROST_SOURCE_PRIORITY[element]
-            ):
-                continue
-            try:
-                timestamp = parse_utc(record["reference_time"])
-            except (KeyError, ValueError) as exc:
-                raise MergeError(f"Invalid Frost timestamp at row {line_number}") from exc
-            if timestamp not in wanted_times:
-                continue
-            quality = record.get("quality_code", "").strip()
-            if quality not in QUALITY_PRIORITY:
-                continue
-            try:
-                observation = Observation(
-                    value=float(record["value"]),
-                    unit=record.get("unit", ""),
-                    source=source,
-                    quality=quality,
-                )
-            except (KeyError, ValueError) as exc:
-                raise MergeError(f"Invalid Frost value at row {line_number}") from exc
-            current = result.setdefault(timestamp, {}).get(element)
-            if current is None or _observation_rank(
-                element, observation
-            ) < _observation_rank(element, current):
-                result[timestamp][element] = observation
+    frost_paths = [paths] if isinstance(paths, Path) else list(paths)
+    if not frost_paths:
+        raise MergeError("No Frost input files were supplied")
+    for path in sorted(frost_paths):
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            for line_number, record in enumerate(csv.DictReader(handle), start=2):
+                element = record.get("element_id", "")
+                source = record.get("source_id", "")
+                if (
+                    element not in FROST_SOURCE_PRIORITY
+                    or source not in FROST_SOURCE_PRIORITY[element]
+                ):
+                    continue
+                try:
+                    timestamp = parse_utc(record["reference_time"])
+                except (KeyError, ValueError) as exc:
+                    raise MergeError(
+                        f"Invalid Frost timestamp in {path} at row {line_number}"
+                    ) from exc
+                if timestamp not in wanted_times:
+                    continue
+                quality = record.get("quality_code", "").strip()
+                if quality not in QUALITY_PRIORITY:
+                    continue
+                try:
+                    observation = Observation(
+                        value=float(record["value"]),
+                        unit=record.get("unit", ""),
+                        source=source,
+                        quality=quality,
+                    )
+                except (KeyError, ValueError) as exc:
+                    raise MergeError(
+                        f"Invalid Frost value in {path} at row {line_number}"
+                    ) from exc
+                current = result.setdefault(timestamp, {}).get(element)
+                if current is None or _observation_rank(
+                    element, observation
+                ) < _observation_rank(element, current):
+                    result[timestamp][element] = observation
     return result
 
 
@@ -385,18 +394,60 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
+def incomplete_era5_years(
+    rows: dict[datetime, Era5Row],
+) -> list[tuple[int, int, int]]:
+    """Return (year, actual, expected) for incomplete calendar years."""
+    counts: dict[int, int] = {}
+    for timestamp in rows:
+        counts[timestamp.year] = counts.get(timestamp.year, 0) + 1
+    return [
+        (year, actual, 8784 if calendar.isleap(year) else 8760)
+        for year, actual in sorted(counts.items())
+        if actual != (8784 if calendar.isleap(year) else 8760)
+    ]
+
+
+def exclude_incomplete_era5_years(
+    rows: dict[datetime, Era5Row],
+    incomplete: Iterable[tuple[int, int, int]],
+) -> dict[datetime, Era5Row]:
+    excluded_years = {year for year, _, _ in incomplete}
+    return {
+        timestamp: row
+        for timestamp, row in rows.items()
+        if timestamp.year not in excluded_years
+    }
+
+
+def default_output_path(rows: dict[datetime, Era5Row]) -> Path:
+    years = sorted({timestamp.year for timestamp in rows})
+    year_label = str(years[0]) if len(years) == 1 else f"{years[0]}-{years[-1]}"
+    return Path(f"local_weatherdata/merged_footprint_weather_{year_label}.csv")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         description="Merge completed ERA5 footprint files with nearby Frost stations."
     )
-    result.add_argument("--year", type=int, default=2025)
+    result.add_argument(
+        "--year",
+        type=int,
+        help="Optional year filter; omit to merge every available ERA5 month",
+    )
     result.add_argument(
         "--era5-directory", type=Path, default=Path("era_5_weatherdata")
     )
     result.add_argument(
         "--frost",
         type=Path,
-        default=Path("local_weatherdata/frost_footprint_inputs_2025-2026.csv"),
+        nargs="+",
+        action="extend",
+        metavar="CSV",
+        help=(
+            "One or more Frost observation CSV files; may be repeated "
+            "(default: local_weatherdata/frost_footprint_inputs_2025-2026.csv)"
+        ),
     )
     result.add_argument(
         "--era5-surface-csv",
@@ -409,12 +460,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--output",
         type=Path,
-        help="Output CSV (default: local_weatherdata/merged_footprint_weather_YEAR.csv)",
+        help=(
+            "Output CSV (default: "
+            "local_weatherdata/merged_footprint_weather_YEAR_OR_RANGE.csv)"
+        ),
     )
     result.add_argument(
         "--allow-partial",
         action="store_true",
-        help="Allow output when fewer than all hours of the requested year are present",
+        help="Allow output when a selected calendar year is incomplete",
     )
     result.add_argument(
         "--missing-wind-policy",
@@ -427,10 +481,14 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    output_path = args.output or Path(
-        f"local_weatherdata/merged_footprint_weather_{args.year}.csv"
+    frost_paths = args.frost or [
+        Path("local_weatherdata/frost_footprint_inputs_2025-2026.csv")
+    ]
+    pattern = (
+        f"era5_footprint_parameters_{args.year}_??.nc"
+        if args.year is not None
+        else "era5_footprint_parameters_????_??.nc"
     )
-    pattern = f"era5_footprint_parameters_{args.year}_??.nc"
     paths = sorted(args.era5_directory.glob(pattern))
     if not paths:
         print(
@@ -441,14 +499,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         era5 = read_era5(paths)
-        expected = 8784 if calendar.isleap(args.year) else 8760
-        if len(era5) != expected and not args.allow_partial:
-            raise MergeError(
-                f"ERA5 contains {len(era5)} of {expected} expected hourly records; "
-                "wait for all monthly downloads or pass --allow-partial"
+        incomplete = incomplete_era5_years(era5)
+        if incomplete and not args.allow_partial:
+            details = "; ".join(
+                f"{year}: {actual} of {expected} hourly records"
+                for year, actual, expected in incomplete
             )
+            print(
+                f"warning: excluding incomplete ERA5 calendar year(s): {details}; "
+                "pass --allow-partial to retain them",
+                file=sys.stderr,
+            )
+            era5 = exclude_incomplete_era5_years(era5, incomplete)
+            if not era5:
+                raise MergeError(
+                    "no complete ERA5 calendar years remain; "
+                    "pass --allow-partial to retain incomplete data"
+                )
+        output_path = args.output or default_output_path(era5)
         wanted_times = set(era5)
-        frost = read_frost(args.frost, wanted_times)
+        frost = read_frost(frost_paths, wanted_times)
         surface_wind_path = (
             args.era5_surface_csv
             if args.era5_surface_csv and args.era5_surface_csv.is_file()
@@ -469,9 +539,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     flagged = sum(row["obukhov_qc"] != "ok" for row in rows)
+    included_years = sorted({timestamp.year for timestamp in era5})
+    included_label = (
+        str(included_years[0])
+        if len(included_years) == 1
+        else f"{included_years[0]}-{included_years[-1]}"
+    )
     print(
-        f"Wrote {len(rows)} merged hourly records from {len(paths)} ERA5 month(s) "
-        f"to {output_path}"
+        f"Wrote {len(rows)} merged hourly records for ERA5 {included_label} "
+        f"from {len(frost_paths)} Frost file(s) to {output_path}"
     )
     if missing_wind:
         print(

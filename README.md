@@ -387,10 +387,22 @@ for a single month, that exact path is used.
 Merge ERA5 with the configured local Frost.met.no observations:
 
 ```powershell
-python .\merge_footprint_weather.py --frost .\local_weatherdata\filename.csv --year 2025
+python .\merge_footprint_weather.py `
+  --frost .\local_weatherdata\frost_part1.csv .\local_weatherdata\frost_part2.csv
 ```
 
-Use `--allow-partial` only for inspection before all monthly files exist.
+`--frost` accepts any number of files and may also be repeated. Overlapping
+observations are resolved together using the same quality-first and
+station-priority rules as a single input file. Without `--year`, all monthly
+ERA5 files in `--era5-directory` are merged and the default output is named
+for the discovered range, for example
+`merged_footprint_weather_2024-2025.csv`. Add `--year 2025` to restrict the
+merge to one calendar year.
+
+Incomplete calendar years are warned about and excluded by default. Pass
+`--allow-partial` to retain them, for example when inspecting data before all
+monthly files exist. If no complete year remains, the merge stops rather than
+writing an empty result.
 The merge:
 
 - prefers configured local Frost wind, temperature, dew point, and pressure;
@@ -402,7 +414,8 @@ The merge:
 Current ERA5 downloads include `u10/v10` as a fallback for missing or calm
 local wind. Hours lacking both Frost and ERA5 wind are skipped with a warning;
 use `--missing-wind-policy error` to abort instead. The default output filename
-uses the requested year, while `--output` is used exactly as supplied.
+uses the selected or discovered year range, while `--output` is used exactly
+as supplied.
 
 ERA5 and hourly Frost data do not provide high-frequency lateral wind
 variance. A sonic anemometer is preferred for `sigv`; otherwise the chosen
