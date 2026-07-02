@@ -65,7 +65,8 @@ python .\run_tower_batch.py `
   --contours `
   --workers 10 `
   --display-percent 80 `
-  --placement-analysis `
+  --outputs footprint,season,stability `
+  --raster-types density,percent `
   --start 2025-01-01 `
   --end 2026-01-01 `
   --output-dir .\output\placement_screening
@@ -84,8 +85,10 @@ project. More workers increase memory use and may not improve throughput.
 | `--morphometry-radius 200` | Half-width of the DOM/DTM subset around each tower. A value of 200 produces an approximately 400 x 400 m analysis window. `--morphometry-distance` is an alias. |
 | `--fetch 2000` | Requested half-width of the footprint output domain. |
 | `--resolution 5` | Footprint raster cell size in metres. |
-| `--interpolate-resolution 2.5` | Writes an additional smoothed annual footprint at this finer cell size. |
+| `--interpolate-resolution 2.5` | Replaces the coarse annual footprint raster with a smoothed raster at this finer cell size. |
 | `--contours` | Writes labelled cumulative-percentage contour lines with a QGIS style. |
+| `--outputs footprint,season,stability` | Selects annual, seasonal, stability, and/or wind-sector output groups. |
+| `--raster-types density,percent` | Selects density rasters, cumulative-percent rasters, or both. |
 | `--display-percent 80` | Cumulative percentage shown by the generated QGIS style. It does not discard values from the raster. |
 | `--angle-step 5` | Direction interval used for morphometry; it must divide 360. |
 
@@ -119,14 +122,13 @@ Each tower receives its own directory containing:
 - `morphology.txt` - directional `pai`, `fai`, height statistics, `zd`, and
   `z0`;
 - `umep_input.txt` - hourly 13-column UMEP input;
-- `footprint_density.tif` - mean footprint density in m-2;
-- `footprint_percent.tif` - cumulative contribution rank from 1 to 100;
+- `footprint_density.tif` - mean footprint density in m-2, when requested;
+- `footprint_percent.tif` - cumulative contribution rank from 1 to 100, when requested;
 - matching `.qml` files for automatic QGIS rendering;
 - optional `footprint_interpolated_*.tif` rasters and a styled
   `footprint_contours.shp` layer;
 - `footprint_qc.csv` - skipped timestamps and rejection reasons;
-- category rasters and `footprint_placement_summary.csv` when
-  `--placement-analysis` is enabled.
+- selected category rasters and `footprint_placement_summary.csv`.
 
 The batch directory also receives `placement_comparison.csv`, combining all
 tower summaries. The terminal reports elapsed time per tower and for the full
@@ -147,10 +149,11 @@ Add the following to the batch or standalone command:
 --contour-smoothing 1.0
 ```
 
-This writes a finer annual density/percentage raster and cumulative-footprint
-contours as a shapefile. The matching QML renders thin dark lines with one
-buffered numeric label placed directly on each contour, so QGIS can load the
-layer without manual style copying.
+This writes the selected finer annual raster type(s) instead of the coarse
+annual raster and writes cumulative-footprint contours as a shapefile. The
+matching QML renders thin dark lines with one buffered percentage label placed
+directly on each contour, so QGIS can load the layer without manual style
+copying.
 Smoothing is expressed in original raster cells. If `--contours` is supplied
 without `--interpolate-resolution`, half the original cell size is used.
 
@@ -251,13 +254,21 @@ as a sensitivity test, not as a way to force records to pass.
 
 ## Placement analysis
 
-`--placement-analysis` accumulates the already calculated hourly footprints
-into:
+Use `--outputs` to select one or more groups:
 
-- annual;
-- growing and dormant seasons;
-- unstable, neutral, and stable conditions;
-- eight meteorological wind sectors.
+- `footprint`: annual;
+- `season`: growing and dormant seasons;
+- `stability`: unstable, neutral, and stable conditions;
+- `wind`: eight meteorological wind sectors.
+
+For example:
+
+```powershell
+--outputs footprint,season,stability `
+--raster-types percent
+```
+
+`--placement-analysis` remains as a shortcut for all four output groups.
 
 The growing season defaults to April-October. Change it with, for example:
 

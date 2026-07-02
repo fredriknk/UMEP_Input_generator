@@ -13,7 +13,7 @@ from pathlib import Path
 
 from calculate_morphometry import calculate_for_tower, project_tower, read_towers, safe_name, write_morphology
 from generate_umep_footprint_input import main as generate_input
-from run_footprint_standalone import main as run_footprint
+from run_footprint_standalone import main as run_footprint, parse_choices
 
 
 def parser() -> argparse.ArgumentParser:
@@ -45,8 +45,10 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--placement-analysis", action="store_true",
-        help="Write seasonal, stability, and wind-sector outputs for siting decisions",
+        help="Shortcut for --outputs footprint,season,stability,wind",
     )
+    result.add_argument("--outputs", default="footprint")
+    result.add_argument("--raster-types", default="density,percent")
     result.add_argument("--growing-months", default="4-10")
     result.add_argument(
         "--display-percent", type=int, default=80,
@@ -88,6 +90,32 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.contour_smoothing < 0:
         print("error: contour-smoothing must be non-negative", file=sys.stderr)
+        return 2
+    try:
+        requested_groups = parse_choices(
+            args.outputs,
+            {"footprint", "season", "stability", "wind"},
+            "outputs",
+        )
+        raster_types = parse_choices(
+            args.raster_types, {"density", "percent"}, "raster-types"
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    output_groups = (
+        ("footprint", "season", "stability", "wind")
+        if args.placement_analysis
+        else requested_groups
+    )
+    category_outputs = bool(set(output_groups) - {"footprint"})
+    if (
+        args.interpolate_resolution is not None or args.contours
+    ) and "footprint" not in output_groups:
+        print(
+            "error: interpolate-resolution and contours require the footprint output",
+            file=sys.stderr,
+        )
         return 2
     if args.measurement_height is not None and args.measurement_height <= 0:
         print("error: measurement-height must be positive", file=sys.stderr)
@@ -156,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                 "--display-percent", str(args.display_percent),
                 "--contour-levels", args.contour_levels,
                 "--contour-smoothing", str(args.contour_smoothing),
+                "--outputs", ",".join(output_groups),
+                "--raster-types", ",".join(raster_types),
             ]
             if args.interpolate_resolution is not None:
                 footprint_args += [
@@ -168,9 +198,11 @@ def main(argv: list[str] | None = None) -> int:
                     "--placement-analysis",
                     "--growing-months", args.growing_months,
                 ]
+            elif category_outputs:
+                footprint_args += ["--growing-months", args.growing_months]
             if run_footprint(footprint_args):
                 raise RuntimeError("footprint calculation failed")
-            if args.placement_analysis:
+            if category_outputs:
                 summary_path = footprint_prefix.with_name(
                     footprint_prefix.name + "_placement_summary.csv"
                 )
@@ -192,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, RuntimeError) as exc:
             print(f"error: {tower.name}: {exc}", file=sys.stderr)
             return 1
-    if args.placement_analysis and comparison_rows:
+    if category_outputs and comparison_rows:
         comparison_path = args.output_dir / "placement_comparison.csv"
         with comparison_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=comparison_rows[0].keys())

@@ -16,6 +16,7 @@ from run_footprint_standalone import (
     _select_output_paths,
     _placement_labels,
     parse_months,
+    parse_choices,
 )
 
 
@@ -90,7 +91,7 @@ class StandaloneFootprintTests(unittest.TestCase):
             reader.close()
             self.assertEqual(levels, {20, 40, 60})
             qml = qml_path.read_text(encoding="utf-8")
-            self.assertIn('fieldName="level"', qml)
+            self.assertIn('fieldName="label"', qml)
             self.assertIn("<text-buffer ", qml)
             self.assertIn('<placement placement="3"', qml)
             self.assertIn('placementFlags="9"', qml)
@@ -132,6 +133,18 @@ class StandaloneFootprintTests(unittest.TestCase):
 
     def test_parse_growing_months(self):
         self.assertEqual(parse_months("4-6,9"), (4, 5, 6, 9))
+
+    def test_parse_output_and_raster_choices(self):
+        self.assertEqual(
+            parse_choices(
+                "footprint,stability,season",
+                {"footprint", "season", "stability", "wind"},
+                "outputs",
+            ),
+            ("footprint", "stability", "season"),
+        )
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            parse_choices("density,png", {"density", "percent"}, "raster-types")
 
 
 if __name__ == "__main__":

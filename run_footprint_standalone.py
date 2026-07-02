@@ -269,7 +269,7 @@ def write_contours(
   </renderer-v2>
   <labeling type="simple">
     <settings calloutType="simple">
-      <text-style fieldName="level" isExpression="0" fontFamily="Arial"
+      <text-style fieldName="label" isExpression="0" fontFamily="Arial"
                   fontSize="8" fontSizeUnit="Point" textColor="35,35,35,255"
                   textOpacity="1" fontWeight="50" namedStyle="Regular">
         <text-buffer bufferDraw="1" bufferSize="0.8" bufferSizeUnits="MM"
@@ -301,7 +301,8 @@ def write_geotiffs(
     tower_x: float,
     tower_y: float,
     crs: str,
-) -> tuple[Path, Path]:
+    raster_types: frozenset[str] = frozenset(("density", "percent")),
+) -> tuple[Path | None, Path | None]:
     try:
         import rasterio
         from rasterio.transform import from_origin
@@ -317,7 +318,7 @@ def write_geotiffs(
         grid.resolution,
         grid.resolution,
     )
-    density_path, percent_path = _select_output_paths(output_prefix)
+    density_path, percent_path = _select_output_paths(output_prefix, raster_types)
 
     common = {
         "driver": "GTiff",
@@ -329,13 +330,19 @@ def write_geotiffs(
         "compress": "deflate",
         "tiled": True,
     }
-    with rasterio.open(density_path, "w", dtype="float32", nodata=0.0, **common) as dst:
-        dst.write(np.flipud(footprint).astype(np.float32), 1)
-        dst.set_band_description(1, "Kljun 2015 footprint density (m-2)")
-    with rasterio.open(percent_path, "w", dtype="uint8", nodata=0, **common) as dst:
-        dst.write(np.flipud(percent), 1)
-        dst.set_band_description(1, "Cumulative contribution percentage")
-    return density_path, percent_path
+    written_density: Path | None = None
+    written_percent: Path | None = None
+    if "density" in raster_types:
+        with rasterio.open(density_path, "w", dtype="float32", nodata=0.0, **common) as dst:
+            dst.write(np.flipud(footprint).astype(np.float32), 1)
+            dst.set_band_description(1, "Kljun 2015 footprint density (m-2)")
+        written_density = density_path
+    if "percent" in raster_types:
+        with rasterio.open(percent_path, "w", dtype="uint8", nodata=0, **common) as dst:
+            dst.write(np.flipud(percent), 1)
+            dst.set_band_description(1, "Cumulative contribution percentage")
+        written_percent = percent_path
+    return written_density, written_percent
 
 
 def _can_replace(path: Path) -> bool:
@@ -358,7 +365,10 @@ def _can_replace(path: Path) -> bool:
         return False
 
 
-def _select_output_paths(output_prefix: Path) -> tuple[Path, Path]:
+def _select_output_paths(
+    output_prefix: Path,
+    raster_types: frozenset[str] = frozenset(("density", "percent")),
+) -> tuple[Path, Path]:
     """Keep density/percent pairs together when QGIS locks an earlier result."""
     def paths(prefix: Path) -> tuple[Path, Path]:
         return (
@@ -367,14 +377,22 @@ def _select_output_paths(output_prefix: Path) -> tuple[Path, Path]:
         )
 
     density, percent = paths(output_prefix)
-    if _can_replace(density) and _can_replace(percent):
+    selected = [
+        path for name, path in (("density", density), ("percent", percent))
+        if name in raster_types
+    ]
+    if all(_can_replace(path) for path in selected):
         return density, percent
 
     run_number = 2
     while True:
         candidate = output_prefix.with_name(f"{output_prefix.name}_run{run_number}")
         density, percent = paths(candidate)
-        if not density.exists() and not percent.exists():
+        selected = [
+            path for name, path in (("density", density), ("percent", percent))
+            if name in raster_types
+        ]
+        if all(not path.exists() for path in selected):
             logging.getLogger("footprint").warning(
                 "Existing output is open or locked; writing this run as %s_*",
                 candidate,
@@ -384,14 +402,14 @@ def _select_output_paths(output_prefix: Path) -> tuple[Path, Path]:
 
 
 def write_qgis_styles(
-    density_path: Path,
-    percent_path: Path,
+    density_path: Path | None,
+    percent_path: Path | None,
     density_max: float,
     display_percent: int = 80,
-) -> tuple[Path, Path]:
+) -> tuple[Path | None, Path | None]:
     """Write same-basename QGIS styles so newly added rasters render usefully."""
-    density_qml = density_path.with_suffix(".qml")
-    percent_qml = percent_path.with_suffix(".qml")
+    density_qml = density_path.with_suffix(".qml") if density_path else None
+    percent_qml = percent_path.with_suffix(".qml") if percent_path else None
     ramp_values = (
         max(1, round(display_percent * 0.25)),
         max(1, round(display_percent * 0.50)),
@@ -400,7 +418,8 @@ def write_qgis_styles(
     hidden_minimum = display_percent + 1
     # Closely follows UMEP/FootprintModel/footprint_style.qml. QGIS interprets
     # alpha in the ramp as per-cell transparency and renderer opacity globally.
-    percent_qml.write_text(
+    if percent_qml:
+        percent_qml.write_text(
         """<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
 <qgis version="3.34" styleCategories="Symbology">
   <pipe>
@@ -437,11 +456,12 @@ def write_qgis_styles(
             ramp_2=ramp_values[1],
             ramp_3=ramp_values[2],
         ),
-        encoding="utf-8",
-    )
+            encoding="utf-8",
+        )
     maximum = max(float(density_max), np.finfo(np.float32).tiny)
     stops = (maximum * 0.002, maximum * 0.02, maximum * 0.12, maximum * 0.45, maximum)
-    density_qml.write_text(
+    if density_qml:
+        density_qml.write_text(
         f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
 <qgis version="3.34" styleCategories="Symbology">
   <pipe>
@@ -472,8 +492,8 @@ def write_qgis_styles(
   <blendMode>0</blendMode>
 </qgis>
 """,
-        encoding="utf-8",
-    )
+            encoding="utf-8",
+        )
     return density_qml, percent_qml
 
 
@@ -482,7 +502,7 @@ def _process_rows(
     x: np.ndarray,
     y: np.ndarray,
     invalid_row_policy: str,
-    placement_analysis: bool = False,
+    output_groups: frozenset[str] = frozenset(("footprint",)),
     growing_months: frozenset[int] = frozenset(range(4, 11)),
 ) -> tuple[
     dict[str, np.ndarray],
@@ -505,8 +525,13 @@ def _process_rows(
         try:
             footprint = footprint_for_row(row, x, y)
             labels = ["annual"]
-            if placement_analysis:
-                labels.extend(_placement_labels(row, growing_months))
+            season, stability, wind = _placement_labels(row, growing_months)
+            if "season" in output_groups:
+                labels.append(season)
+            if "stability" in output_groups:
+                labels.append(stability)
+            if "wind" in output_groups:
+                labels.append(wind)
             for label in labels:
                 if label not in totals:
                     totals[label] = np.zeros(x.shape, dtype=np.float64)
@@ -543,12 +568,15 @@ def _placement_labels(row: np.ndarray, growing_months: frozenset[int]) -> tuple[
 def run(args: argparse.Namespace) -> int:
     run_started = time.perf_counter()
     log = logging.getLogger("footprint")
+    args.output_prefix.parent.mkdir(parents=True, exist_ok=True)
     rows = read_umep_input(args.input)
     if args.limit is not None:
         rows = rows[: args.limit]
     grid = Grid(args.fetch, args.resolution)
     x, y = grid.coordinates()
     growing_months = frozenset(args.growing_months)
+    output_groups = frozenset(args.output_groups)
+    raster_types = frozenset(args.raster_types)
     log.info(
         "Loaded %d rows; grid %dx%d at %.2f m (%.1f m fetch); workers=%d",
         len(rows), grid.size, grid.size, grid.resolution, grid.extent, args.workers,
@@ -556,7 +584,7 @@ def run(args: argparse.Namespace) -> int:
     if args.workers == 1 or len(rows) < 2:
         totals, counts, qc_rows = _process_rows(
             rows, x, y, args.invalid_row_policy,
-            args.placement_analysis, growing_months,
+            output_groups, growing_months,
         )
     else:
         # Several fairly large chunks reduce scheduling overhead and bound the
@@ -571,7 +599,7 @@ def run(args: argparse.Namespace) -> int:
             futures = {
                 executor.submit(
                     _process_rows, chunk, x, y, args.invalid_row_policy,
-                    args.placement_analysis, growing_months,
+                    output_groups, growing_months,
                 ): len(chunk)
                 for chunk in chunks
             }
@@ -596,13 +624,19 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("no valid footprints were calculated")
     climatology = totals["annual"] / valid_count
     percent, captured_mass = contribution_percent_raster(climatology, grid.resolution)
-    density_path, percent_path = write_geotiffs(
-        args.output_prefix, climatology, percent, grid,
-        args.tower_x, args.tower_y, args.crs,
-    )
-    density_qml, percent_qml = write_qgis_styles(
-        density_path, percent_path, float(climatology.max()), args.display_percent
-    )
+    # A requested interpolated annual footprint replaces the coarse annual
+    # raster. Category rasters remain at the primary calculation resolution.
+    if "footprint" in output_groups and args.interpolate_resolution is None and not args.contours:
+        density_path, percent_path = write_geotiffs(
+            args.output_prefix, climatology, percent, grid,
+            args.tower_x, args.tower_y, args.crs, raster_types,
+        )
+        density_qml, percent_qml = write_qgis_styles(
+            density_path, percent_path, float(climatology.max()), args.display_percent
+        )
+        for path in (density_path, percent_path, density_qml, percent_qml):
+            if path:
+                log.info("Wrote %s", path)
 
     qc_path = args.output_prefix.with_name(args.output_prefix.name + "_qc.csv")
     with qc_path.open("w", newline="", encoding="utf-8") as handle:
@@ -610,9 +644,6 @@ def run(args: argparse.Namespace) -> int:
         writer.writerow(("iy", "id", "it", "imin", "status"))
         writer.writerows(qc_rows)
 
-    log.info("Wrote %s", density_path)
-    log.info("Wrote %s", percent_path)
-    log.info("Wrote QGIS styles %s and %s", density_qml, percent_qml)
     log.info(
         "Valid rows: %d; skipped: %d; footprint mass inside raster: %.4f",
         valid_count, len(qc_rows), captured_mass,
@@ -620,7 +651,9 @@ def run(args: argparse.Namespace) -> int:
     if captured_mass < 0.8:
         log.warning("Less than 80% of the modelled mass is inside the selected fetch")
 
-    if args.interpolate_resolution is not None or args.contours:
+    if "footprint" in output_groups and (
+        args.interpolate_resolution is not None or args.contours
+    ):
         target_resolution = (
             args.interpolate_resolution
             if args.interpolate_resolution is not None
@@ -638,8 +671,9 @@ def run(args: argparse.Namespace) -> int:
         interpolated_density_path, interpolated_percent_path = write_geotiffs(
             interpolated_prefix, interpolated, interpolated_percent,
             interpolated_grid, args.tower_x, args.tower_y, args.crs,
+            raster_types,
         )
-        write_qgis_styles(
+        interpolated_styles = write_qgis_styles(
             interpolated_density_path,
             interpolated_percent_path,
             float(interpolated.max()),
@@ -649,6 +683,13 @@ def run(args: argparse.Namespace) -> int:
             "Wrote interpolated footprint at %.3f m resolution",
             interpolated_grid.resolution,
         )
+        for path in (
+            interpolated_density_path,
+            interpolated_percent_path,
+            *interpolated_styles,
+        ):
+            if path:
+                log.info("Wrote %s", path)
         if args.contours:
             contour_path = args.output_prefix.with_name(
                 args.output_prefix.name + "_contours.shp"
@@ -664,14 +705,18 @@ def run(args: argparse.Namespace) -> int:
             )
             log.info("Wrote contours %s and QGIS style %s", shape_path, contour_qml)
 
-    if args.placement_analysis:
+    category_groups = output_groups - {"footprint"}
+    if category_groups:
         summary_path = args.output_prefix.with_name(
             args.output_prefix.name + "_placement_summary.csv"
         )
-        summary_rows = [
-            ("annual", valid_count, captured_mass,
-             int(np.count_nonzero((percent > 0) & (percent <= 80))) * grid.resolution**2)
-        ]
+        summary_rows = []
+        if "footprint" in output_groups:
+            summary_rows.append(
+                ("annual", valid_count, captured_mass,
+                 int(np.count_nonzero((percent > 0) & (percent <= 80)))
+                 * grid.resolution**2)
+            )
         preferred_order = (
             "growing", "dormant",
             "stability_unstable", "stability_neutral", "stability_stable",
@@ -679,6 +724,13 @@ def run(args: argparse.Namespace) -> int:
             "wind_S", "wind_SW", "wind_W", "wind_NW",
         )
         for label in preferred_order:
+            group = (
+                "season" if label in ("growing", "dormant")
+                else "stability" if label.startswith("stability_")
+                else "wind"
+            )
+            if group not in output_groups:
+                continue
             count = counts.get(label, 0)
             if not count:
                 continue
@@ -692,6 +744,7 @@ def run(args: argparse.Namespace) -> int:
             category_density, category_percent_path = write_geotiffs(
                 category_prefix, category, category_percent, grid,
                 args.tower_x, args.tower_y, args.crs,
+                raster_types,
             )
             write_qgis_styles(
                 category_density, category_percent_path, float(category.max()),
@@ -739,7 +792,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--placement-analysis",
         action="store_true",
-        help="Also write growing/dormant, stability, and eight wind-sector climatologies",
+        help="Shortcut for --outputs footprint,season,stability,wind",
+    )
+    parser.add_argument(
+        "--outputs",
+        help=(
+            "Comma-separated output groups: footprint, season, stability, wind. "
+            "Default: footprint"
+        ),
+    )
+    parser.add_argument(
+        "--raster-types",
+        default="density,percent",
+        help="Raster products to write: density, percent, or both (default: both)",
     )
     parser.add_argument(
         "--display-percent",
@@ -794,6 +859,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.contour_smoothing < 0:
         parser.error("--contour-smoothing must be non-negative")
     try:
+        requested_groups = parse_choices(
+            args.outputs or "footprint",
+            {"footprint", "season", "stability", "wind"},
+            "outputs",
+        )
+        args.raster_types = parse_choices(
+            args.raster_types, {"density", "percent"}, "raster-types"
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.output_groups = (
+        ("footprint", "season", "stability", "wind")
+        if args.placement_analysis
+        else requested_groups
+    )
+    if (
+        args.interpolate_resolution is not None or args.contours
+    ) and "footprint" not in args.output_groups:
+        parser.error("--interpolate-resolution and --contours require the footprint output")
+    try:
         args.contour_levels = tuple(
             sorted({int(value.strip()) for value in args.contour_levels.split(",")})
         )
@@ -806,6 +891,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     except ValueError as exc:
         parser.error(str(exc))
     return args
+
+
+def parse_choices(
+    value: str, allowed: set[str], option_name: str
+) -> tuple[str, ...]:
+    """Parse a unique comma-separated CLI choice list."""
+    choices = tuple(
+        dict.fromkeys(item.strip().lower() for item in value.split(",") if item.strip())
+    )
+    invalid = [item for item in choices if item not in allowed]
+    if not choices or invalid:
+        expected = ", ".join(sorted(allowed))
+        detail = f"; invalid: {', '.join(invalid)}" if invalid else ""
+        raise ValueError(f"{option_name} must contain one or more of: {expected}{detail}")
+    return choices
 
 
 def parse_months(value: str) -> tuple[int, ...]:
