@@ -284,8 +284,98 @@ domain. Compare valid-hour counts alongside footprint size: a compact annual
 footprint can be misleading when many obstructed wind sectors were rejected.
 
 For tower placement, the most useful next metric is usually the fraction of
-footprint contribution falling inside the intended plot polygon. That metric
-is not currently calculated by this repository.
+footprint contribution falling inside the intended plot polygon. Use
+`footprint_in_polygons.py` (below) to calculate it.
+
+## Footprint share inside polygons
+
+`footprint_in_polygons.py` reports the percentage of each footprint that falls
+inside polygons, grouped by an attribute. Use field or plot polygons to check
+how much of each tower's signal comes from its own field, or a soil or
+land-cover map to get footprint-weighted class shares.
+
+```powershell
+python .\footprint_in_polygons.py .\output\placement_screening `
+  --polygons .\maps\fields.shp `
+  --class-field field_id `
+  --output .\output\placement_screening\footprint_in_fields.csv
+```
+
+- Pass density rasters or folders; folders are searched for `*density.tif`,
+  preferring the interpolated rasters when both exist.
+- Polygons can be a shapefile or a GeoPackage layer (`--layer`). They are
+  reprojected to the raster CRS when their CRS is known, so check that the
+  `.prj` matches the real coordinates.
+- Where polygons overlap, each cell counts once, for the first polygon.
+  Footprint mass outside all polygons is reported as `(outside polygons)`.
+- Shares are relative to the footprint mass inside the raster. Check
+  `captured_mass` in `footprint_placement_summary.csv` first (see the note on
+  grid resolution below).
+
+## Crop-following inlet heights
+
+Flux-gradient towers often raise their inlets as the crop grows instead of
+using one fixed height. `crop_following_inlets.py` turns a crop-height schedule
+into an inlet schedule and writes the matching hourly height into a UMEP input
+file:
+
+```text
+lower inlet = max(minimum lower, factor x crop height), rounded up to the step
+upper inlet = lower inlet + separation
+z_eff       = d + sqrt((lower - d) * (upper - d)),   d = crop zd factor x crop height
+```
+
+The default factor 2.2 is the Kljun validity limit `zm > zd + 12.5*z0` with the
+default crop roughness (`2/3 + 12.5 x 0.123 = 2.2`). Inlets are held at their
+highest setting while the crop ripens and lowered when the crop falls below
+`--harvest-below`. Defaults: `--minimum-lower 0.5 --separation 0.5 --step 0.1`.
+
+Print and save the daily inlet schedule:
+
+```powershell
+python .\crop_following_inlets.py schedule `
+  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_generic.csv `
+  --year 2025 `
+  --output .\output\inlet_schedule_2025.csv
+```
+
+Generate the input with a high fixed height so that no hour is dropped before
+the real height is applied, then replace the height column and run the
+footprint:
+
+```powershell
+python .\generate_umep_footprint_input.py `
+  --morphology .\output\morphometry\1\morphology.txt `
+  --weather .\local_weatherdata\merged_footprint_weather_2025.csv `
+  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_generic.csv `
+  --measurement-height 10 `
+  --sigma-v-ustar-ratio 2.0 `
+  --invalid-row-policy skip `
+  --output .\output\umep_input_zm10.txt
+
+python .\crop_following_inlets.py apply `
+  --crop-height-schedule .\crop_schedules\south_oslo_spring_cereal_generic.csv `
+  --input .\output\umep_input_zm10.txt `
+  --output .\output\umep_input_crop_following.txt
+
+python .\run_footprint_standalone.py `
+  --input .\output\umep_input_crop_following.txt `
+  --tower-x 599753 --tower-y 6615344 `
+  --fetch 600 --resolution 2 --workers 10 `
+  --output-prefix .\output\crop_following\footprint
+```
+
+The footprint runner validates every hour again with the new height, so hours
+where the inlets are inside the roughness sublayer are skipped as usual.
+
+### Grid resolution for low sensors
+
+The footprint peak moves closer to the tower as the measurement height falls.
+With effective heights below about 1 m, a 10 m grid misses part of the
+footprint near the tower: in a test with crop-following inlets, `captured_mass`
+was 0.77-0.85 at 10 m resolution and 0.98-0.99 at 2 m resolution (600 m
+fetch). Use a fine grid for low sensors and check `captured_mass` before
+interpreting areas or shares.
 
 ## Morphometry only
 
